@@ -21,6 +21,7 @@ const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
+googleProvider.addScope('https://www.googleapis.com/auth/webmasters'); // Add Search Console scope
 
 export { auth, db, googleProvider };
 export default app;

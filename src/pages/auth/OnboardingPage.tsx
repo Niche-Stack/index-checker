@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle, ChevronRight, ArrowRight, Globe, Search, Cog } from 'lucide-react';
+import { CheckCircle, ChevronRight, ArrowRight, Globe, Search } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db } from '../../config/firebase';
 
 const OnboardingPage: React.FC = () => {
   const [step, setStep] = useState(1);
   const [seoFocus, setSeoFocus] = useState('');
-  const [makeConnected, setMakeConnected] = useState(false);
+  const [siteUrl, setSiteUrl] = useState('');
+  const [sitemapUrl, setSitemapUrl] = useState('');
   const [searchConsoleConnected, setSearchConsoleConnected] = useState(false);
-  const { updateUserProfile } = useAuth();
+  const { updateUserProfile, connectSearchConsole: connectSearchConsoleAuth, currentUser } = useAuth();
   const navigate = useNavigate();
 
   const totalSteps = 3;
@@ -28,31 +31,62 @@ const OnboardingPage: React.FC = () => {
   };
 
   const completeOnboarding = async () => {
+    if (!currentUser) {
+      console.error("User not found, cannot complete onboarding");
+      return;
+    }
+
     try {
       await updateUserProfile({
         seoFocus,
-        makeConnected,
-        searchConsoleConnected,
         onboardingCompleted: true
       });
+
+      let formattedSiteUrl = siteUrl;
+      if (formattedSiteUrl && !/^https?:\/\//i.test(formattedSiteUrl)) {
+        formattedSiteUrl = 'https://' + formattedSiteUrl;
+      }
+      let formattedSitemapUrl = sitemapUrl;
+      if (sitemapUrl && !/^https?:\/\//i.test(formattedSitemapUrl)) {
+        formattedSitemapUrl = 'https://' + formattedSitemapUrl;
+      }
+
+      const siteData = {
+        userId: currentUser.uid,
+        name: formattedSiteUrl ? new URL(formattedSiteUrl).hostname : 'Unnamed Site',
+        url: formattedSiteUrl,
+        sitemapUrl: formattedSitemapUrl || '',
+        createdAt: serverTimestamp(),
+        lastScan: null,
+        totalPages: 0,
+        indexedPages: 0,
+      };
+
+      await addDoc(collection(db, 'sites'), siteData);
+      console.log('Site added to Firestore:', siteData);
+
+      if (!searchConsoleConnected) {
+        console.warn('Search Console not connected before completing onboarding.');
+      }
+      
       navigate('/dashboard');
     } catch (err) {
       console.error('Error completing onboarding:', err);
     }
   };
 
-  const connectMake = () => {
-    // In a real app, this would open a Make.com OAuth flow
-    setTimeout(() => {
-      setMakeConnected(true);
-    }, 1000);
-  };
-
-  const connectSearchConsole = () => {
-    // In a real app, this would open a Google Search Console OAuth flow
-    setTimeout(() => {
-      setSearchConsoleConnected(true);
-    }, 1000);
+  const handleConnectSearchConsole = async () => {
+    try {
+      const accessToken = await connectSearchConsoleAuth();
+      if (accessToken) {
+        setSearchConsoleConnected(true);
+        console.log('Search Console connected successfully.');
+      } else {
+        console.error('Search Console connection failed. Access token not received.');
+      }
+    } catch (error) {
+      console.error('Error during Search Console connection process:', error);
+    }
   };
 
   return (
@@ -91,7 +125,7 @@ const OnboardingPage: React.FC = () => {
         </div>
         <div className="flex justify-between mt-2 text-xs text-slate-500">
           <span>Your Profile</span>
-          <span className="ml-2">Connect Make.com</span>
+          <span className="ml-2">Add Your Site</span> {/* Changed label */}
           <span>Connect Search Console</span>
         </div>
       </div>
@@ -127,38 +161,48 @@ const OnboardingPage: React.FC = () => {
           </div>
         )}
 
-        {/* Step 2: Connect Make.com */}
+        {/* Step 2: Add Your Site */}
         {step === 2 && (
           <div>
-            <h2 className="text-2xl font-bold mb-6">Connect with Make.com</h2>
+            <h2 className="text-2xl font-bold mb-6">Add Your Site</h2>
             <p className="text-slate-600 mb-6">
-              Index Checker uses Make.com to automate the indexing process for your web pages.
+              Provide the URL of the site you want to index and its sitemap URL.
             </p>
 
             <div className="bg-slate-50 p-5 rounded-lg mb-8 border border-slate-200">
               <div className="flex items-start">
                 <div className="mr-4 mt-1">
-                  <Cog className="w-6 h-6 text-slate-400" />
+                  <Globe className="w-6 h-6 text-slate-400" /> {/* Changed icon */}
                 </div>
                 <div>
-                  <h3 className="font-medium text-slate-800 mb-1">Automated Workflows</h3>
+                  <h3 className="font-medium text-slate-800 mb-1">Site Details</h3>
                   <p className="text-sm text-slate-600 mb-4">
-                    We'll create custom Make.com workflows that monitor and maintain your page indexing status automatically.
+                    We'll use this information to track and manage your site's indexing status.
                   </p>
                   
-                  {makeConnected ? (
-                    <div className="flex items-center text-green-600">
-                      <CheckCircle className="w-5 h-5 mr-2" />
-                      <span className="font-medium">Successfully connected</span>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={connectMake}
-                      className="btn-primary py-2"
-                    >
-                      Connect Make.com
-                    </button>
-                  )}
+                  <div className="space-y-4">
+                    <label className="block">
+                      <span className="text-sm font-medium text-slate-700">Site URL</span>
+                      <input
+                        type="url"
+                        value={siteUrl}
+                        onChange={(e) => setSiteUrl(e.target.value)}
+                        placeholder="https://www.example.com"
+                        className="input w-full mt-1"
+                        required
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-sm font-medium text-slate-700">Sitemap URL (optional)</span>
+                      <input
+                        type="url"
+                        value={sitemapUrl}
+                        onChange={(e) => setSitemapUrl(e.target.value)}
+                        placeholder="https://www.example.com/sitemap.xml"
+                        className="input w-full mt-1"
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>
@@ -191,7 +235,7 @@ const OnboardingPage: React.FC = () => {
                     </div>
                   ) : (
                     <button
-                      onClick={connectSearchConsole}
+                      onClick={handleConnectSearchConsole} // Updated to call new handler
                       className="btn-primary py-2"
                     >
                       Connect Search Console
@@ -220,7 +264,7 @@ const OnboardingPage: React.FC = () => {
             onClick={handleNext}
             className="btn-primary"
             disabled={(step === 1 && !seoFocus) || 
-                    (step === 2 && !makeConnected) || 
+                    (step === 2 && (!siteUrl)) || // Sitemap URL is optional
                     (step === 3 && !searchConsoleConnected)}
           >
             {step < totalSteps ? (

@@ -12,4 +12,5 @@ export interface User {
   seoFocus: string;
   makeConnected: boolean;
   searchConsoleConnected: boolean;
+  searchConsoleAccessToken?: string; // Added field for Search Console access token
 }

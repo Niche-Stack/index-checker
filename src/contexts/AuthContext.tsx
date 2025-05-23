@@ -3,9 +3,10 @@ import {
   User as FirebaseUser, 
   onAuthStateChanged, 
   signInWithPopup,
-  signOut as firebaseSignOut 
+  signOut as firebaseSignOut,
+  GoogleAuthProvider, // Import GoogleAuthProvider to access credentialFromResult
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, Timestamp, updateDoc } from 'firebase/firestore'; // Import updateDoc
 import { auth, db, googleProvider } from '../config/firebase';
 import { User } from '../types/user';
 
@@ -17,6 +18,7 @@ interface AuthContextType {
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   updateUserProfile: (data: Partial<User>) => Promise<void>;
+  connectSearchConsole: () => Promise<string | null>; // New method
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -77,6 +79,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, []);
 
+  const connectSearchConsole = async (): Promise<string | null> => {
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+    try {
+      const result = await signInWithPopup(auth, googleProvider); // Re-authenticate with Google to get Search Console scope
+      const credential = GoogleAuthProvider.credentialFromResult(result); // Correct way to get credential
+      const accessToken = credential?.accessToken; // Correct way to get access token
+
+      if (accessToken) {
+        // Store the access token securely, e.g., in Firestore
+        const userRef = doc(db, 'users', currentUser.uid);
+        await updateDoc(userRef, {
+          searchConsoleAccessToken: accessToken,
+          searchConsoleConnected: true, // Update connection status
+          updatedAt: serverTimestamp(),
+        });
+        // Update local user profile state
+        if (userProfile) {
+          setUserProfile({
+            ...userProfile,
+            searchConsoleAccessToken: accessToken,
+            searchConsoleConnected: true,
+            updatedAt: Timestamp.now(),
+          });
+        }
+        return accessToken;
+      } else {
+        throw new Error('Failed to retrieve access token for Search Console.');
+      }
+    } catch (err) {
+      console.error('Error connecting Search Console:', err);
+      setError('Failed to connect Search Console. Please try again.');
+      throw err;
+    }
+  };
+
   const signInWithGoogle = async () => {
     try {
       setError(null);
@@ -124,27 +163,53 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateUserProfile = async (data: Partial<User>) => {
-    if (!currentUser) return;
-    
+    if (!currentUser) {
+      console.error("Cannot update profile: no current user.");
+      setError("User not authenticated for profile update.");
+      throw new Error("User not authenticated");
+    }
+
     try {
       const userRef = doc(db, 'users', currentUser.uid);
-      await setDoc(userRef, { 
-        ...data, 
-        updatedAt: serverTimestamp() 
+      await setDoc(userRef, {
+        ...data,
+        updatedAt: serverTimestamp()
       }, { merge: true });
-      
-      // Update local state
-      if (userProfile) {
-        setUserProfile({ 
-          ...userProfile, 
-          ...data,
-          updatedAt: Timestamp.now()
-        });
-      }
+
+      // Update local userProfile state more robustly
+      setUserProfile(prevProfile => {
+        const dataToUpdate = { ...data, updatedAt: Timestamp.now() };
+
+        if (prevProfile) {
+          return {
+            ...prevProfile,
+            ...dataToUpdate,
+          };
+        } else {
+          // This case handles if prevProfile was null.
+          // We construct a new User object based on currentUser and data.
+          // This ensures all required fields are present.
+          return {
+            uid: currentUser.uid,
+            email: currentUser.email || '',
+            displayName: currentUser.displayName || '',
+            photoURL: currentUser.photoURL || '',
+            createdAt: Timestamp.now(), // Default for a new local profile representation
+            credits: 0, // Default credits, data might override this if 'credits' is in data
+            onboardingCompleted: false, // Default, data will override this
+            seoFocus: '', // Default, data will override this
+            makeConnected: false, // Default
+            searchConsoleConnected: false, // Default
+            searchConsoleAccessToken: undefined, // Default
+            ...dataToUpdate, // Apply the actual updates from 'data' and the new updatedAt
+          } as User;
+        }
+      });
+
     } catch (err) {
       console.error('Error updating user profile:', err);
       setError('Failed to update profile');
-      throw err;
+      throw err; // Re-throw to be caught by caller if necessary
     }
   };
 
@@ -155,7 +220,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     error,
     signInWithGoogle,
     signOut,
-    updateUserProfile
+    updateUserProfile,
+    connectSearchConsole, // Add to context value
   };
 
   return (
