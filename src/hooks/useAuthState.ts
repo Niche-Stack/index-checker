@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { doc, onSnapshot } from 'firebase/firestore'; // Import onSnapshot, removed getDoc and DocumentData
 import { auth, db } from '../config/firebase';
 import { User } from '../types/user';
 
@@ -10,33 +10,63 @@ export function useAuthState() {
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(
+    // Listener for Firebase Auth state changes
+    const unsubscribeAuth = onAuthStateChanged(
       auth,
-      async (firebaseUser) => {
-        setLoading(true);
-        try {
-          if (firebaseUser) {
-            const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-            if (userDoc.exists()) {
-              setUser(userDoc.data() as User);
-            } else {
+      (firebaseUser: FirebaseUser | null) => {
+        if (firebaseUser) {
+          // User is signed in, now listen for Firestore document changes
+          setLoading(true);
+          const userDocRef = doc(db, 'users', firebaseUser.uid);
+
+          // Listener for user document changes in Firestore
+          const unsubscribeFirestore = onSnapshot(
+            userDocRef,
+            (docSnap) => {
+              if (docSnap.exists()) {
+                setUser(docSnap.data() as User);
+              } else {
+                // This case might happen if the user document is deleted
+                // or was never created properly after sign-up.
+                console.warn(`User document not found for UID: ${firebaseUser.uid}`);
+                setUser(null);
+              }
+              setLoading(false);
+            },
+            (firestoreError) => {
+              console.error('Error listening to user document:', firestoreError);
+              setError(firestoreError);
               setUser(null);
+              setLoading(false);
             }
-          } else {
-            setUser(null);
-          }
-        } catch (err) {
-          console.error('Error in auth state:', err);
-          setError(err instanceof Error ? err : new Error('Unknown error'));
+          );
+
+          // Return cleanup function for Firestore listener
+          return () => {
+            unsubscribeFirestore();
+            // When auth state changes to logged out, or component unmounts while logged in,
+            // we also want to reset user state if not already handled by outer logic.
+            // However, the primary reset for logout is handled by the 'else' block below.
+          };
+        } else {
+          // User is signed out
           setUser(null);
-        } finally {
           setLoading(false);
         }
       },
-      setError
+      (authError) => {
+        console.error('Error in auth state listener:', authError);
+        setError(authError);
+        setUser(null);
+        setLoading(false);
+      }
     );
 
-    return () => unsubscribe();
+    // Return cleanup function for Auth listener
+    return () => {
+      unsubscribeAuth();
+      // Note: The Firestore listener's cleanup is handled within the auth listener's scope.
+    };
   }, []);
 
   return { user, loading, error };

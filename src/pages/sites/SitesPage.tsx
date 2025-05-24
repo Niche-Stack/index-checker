@@ -3,25 +3,21 @@ import {
   Plus, 
   Search, 
   Globe, 
-  RefreshCw, 
-  MoreVertical, 
-  ExternalLink,
-  Trash2, 
-  Edit
+  RefreshCw
 } from 'lucide-react';
 import { collection, query, where, getDocs, orderBy, doc, deleteDoc } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Site } from '../../types/site';
-import AddSiteModal from './components/AddSiteModal';
 import SiteListItem from './components/SiteListItem';
+import ComingSoonModal from './components/ComingSoonModal'; // Import the new modal
 
 const SitesPage: React.FC = () => {
   const { currentUser } = useAuth();
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isComingSoonModalOpen, setIsComingSoonModalOpen] = useState(false); // Add state for the modal
 
   useEffect(() => {
     if (!currentUser) return;
@@ -52,10 +48,6 @@ const SitesPage: React.FC = () => {
     fetchSites();
   }, [currentUser]);
 
-  const handleSiteAdded = (newSite: Site) => {
-    setSites(prev => [newSite, ...prev]);
-  };
-
   const handleDeleteSite = async (siteId: string) => {
     if (!confirm('Are you sure you want to delete this site? This action cannot be undone.')) {
       return;
@@ -85,7 +77,7 @@ const SitesPage: React.FC = () => {
         
         <div className="mt-4 md:mt-0">
           <button 
-            onClick={() => setIsAddModalOpen(true)}
+            onClick={() => setIsComingSoonModalOpen(true)} // Open modal onClick
             className="btn-primary"
           >
             <Plus className="w-4 h-4 mr-2" />
@@ -147,25 +139,15 @@ const SitesPage: React.FC = () => {
               <>
                 <h3 className="text-lg font-medium text-slate-800 mb-2">No sites added yet</h3>
                 <p className="text-slate-500 mb-4">Add your first site to start monitoring indexing</p>
-                <button 
-                  onClick={() => setIsAddModalOpen(true)}
-                  className="btn-primary"
-                >
-                  <Plus className="w-4 h-4 mr-2" />
-                  Add Site
-                </button>
               </>
             )}
           </div>
         )}
       </div>
 
-      {/* Add site modal */}
-      {isAddModalOpen && (
-        <AddSiteModal 
-          onClose={() => setIsAddModalOpen(false)} 
-          onSiteAdded={handleSiteAdded}
-        />
+      {/* Coming Soon Modal */}
+      {isComingSoonModalOpen && (
+        <ComingSoonModal onClose={() => setIsComingSoonModalOpen(false)} />
       )}
     </div>
   );
