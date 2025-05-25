@@ -16,11 +16,11 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
 
   const getActivityIcon = (activity: IndexingHistory) => {
     if (activity.action === 'check') {
-      return activity.result === 'indexed' 
+      return activity.status === 'successful' 
         ? <CheckCircle className="w-5 h-5 text-green-600" />
         : <AlertTriangle className="w-5 h-5 text-amber-600" />;
     } else {
-      return activity.result === 'successful' || activity.result === 'pending'
+      return activity.status === 'successful' || activity.status === 'pending'
         ? <RefreshCw className="w-5 h-5 text-blue-600" />
         : <AlertTriangle className="w-5 h-5 text-red-600" />;
     }
@@ -30,13 +30,13 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
     const siteName = getSiteNameById(activity.siteId);
     
     if (activity.action === 'check') {
-      return activity.result === 'indexed'
+      return activity.status === 'successful'
         ? `Page on ${siteName} is indexed`
         : `Page on ${siteName} is not indexed`;
     } else {
-      if (activity.result === 'successful') {
+      if (activity.status === 'successful') {
         return `Successfully requested indexing for page on ${siteName}`;
-      } else if (activity.result === 'pending') {
+      } else if (activity.status === 'pending') {
         return `Submitted indexing request for page on ${siteName}`;
       } else {
         return `Failed to request indexing for page on ${siteName}`;

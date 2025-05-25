@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../config/firebase';
-import { SitePage } from '../types/site';
+import { Page } from '../types/site';
 
-export function useSitePages(siteId: string | null) {
-  const [pages, setPages] = useState<SitePage[]>([]);
+export function usePages(siteId: string | null) {
+  const [pages, setPages] = useState<Page[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,7 +27,7 @@ export function useSitePages(siteId: string | null) {
         const pagesData = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
-        })) as SitePage[];
+        })) as Page[];
         
         setPages(pagesData);
       } catch (err) {

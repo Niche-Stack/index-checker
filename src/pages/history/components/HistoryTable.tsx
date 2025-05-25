@@ -15,13 +15,13 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
     return site ? site.name : 'Unknown Site';
   };
 
-  const getActionIcon = (action: string, result: string) => {
+  const getActionIcon = (action: string, status: string) => {
     if (action === 'check') {
-      return result === 'indexed' 
+      return status === 'successful'
         ? <CheckCircle className="w-5 h-5 text-green-600" />
         : <AlertTriangle className="w-5 h-5 text-amber-600" />;
-    } else {
-      return result === 'successful' || result === 'pending'
+    } else { // action === 'request'
+      return status === 'successful' || status === 'pending'
         ? <RefreshCw className="w-5 h-5 text-blue-600" />
         : <AlertTriangle className="w-5 h-5 text-red-600" />;
     }
@@ -102,24 +102,24 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
         <tbody className="divide-y divide-slate-100">
           {history.map(item => (
             <tr key={item.id} className="hover:bg-slate-50 transition-colors">
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
+              <td className="px-6 py-4 text-sm text-slate-700">
                 {format(item.timestamp.toDate(), 'MMM d, yyyy h:mm a')}
               </td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
+              <td className="px-6 py-4 text-sm font-medium text-slate-900">
                 {getSiteNameById(item.siteId)}
               </td>
-              <td className="px-6 py-4 whitespace-nowrap">
+              <td className="px-6 py-4">
                 <div className="flex items-center text-sm text-slate-700">
-                  {getActionIcon(item.action, item.result)}
+                  {getActionIcon(item.action, item.status)}
                   <span className="ml-2">{getActionText(item.action)}</span>
                 </div>
               </td>
-              <td className="px-6 py-4 whitespace-nowrap">
+              <td className="px-6 py-4">
                 <span className={`px-2 py-1 text-xs font-medium rounded-full ${getResultClass(item.result)}`}>
                   {getResultText(item.result)}
                 </span>
               </td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700 text-right">
+              <td className="px-6 py-4 text-sm text-slate-700 text-right">
                 {item.creditsUsed}
               </td>
             </tr>

@@ -73,10 +73,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               updatedAt: serverTimestamp() as Timestamp,
               onboardingCompleted: false,
               credits: 100, // Free credits on signup
-              seoFocus: '', // Added comma here
-              makeConnected: false, // Ensure this field is initialized
+              seoFocus: '',
               searchConsoleConnected: false, // Ensure this field is initialized
               searchConsoleAccessToken: undefined, // Ensure this field is initialized
+              // searchConsoleRefreshToken will be added if available during signInWithGoogle or connectSearchConsole
             };
             
             await setDoc(userRef, newUser);
@@ -179,11 +179,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const result = await signInWithPopup(auth, googleProvider);
       const credential = GoogleAuthProvider.credentialFromResult(result);
       const accessToken = credential?.accessToken;
+      const refreshToken = result.user?.refreshToken; // Capture the refresh token
+      let expiryTime: number | null = null;
+      if (credential) {
+        const idToken = credential.idToken;
+        if (idToken) {
+          try {
+        const payload = JSON.parse(atob(idToken.split('.')[1]));
+        expiryTime = payload.exp ? payload.exp * 1000 : null;
+        console.log("Token expires at:", expiryTime ? new Date(expiryTime) : 'No expiry found');
+          } catch (e) {
+        console.error("Failed to decode JWT:", e);
+        expiryTime = null;
+          }
+        }
+      }
 
       if (accessToken) {
         const userRef = doc(db, 'users', currentUser.uid);
         await updateDoc(userRef, {
           searchConsoleAccessToken: accessToken,
+          searchConsoleRefreshToken: refreshToken, // Store the refresh token
+          searchConsoleAccessTokenExpiryTime: expiryTime ? Timestamp.fromMillis(expiryTime) : null,
           searchConsoleConnected: true,
           updatedAt: serverTimestamp(),
         });
@@ -202,15 +219,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 credits: 0,
                 onboardingCompleted: false,
                 seoFocus: '',
-                makeConnected: false,
                 searchConsoleConnected: true,
                 searchConsoleAccessToken: accessToken,
+                searchConsoleRefreshToken: refreshToken, // Add to local profile state
                 updatedAt: Timestamp.now(),
              } as User;
           }
           return {
             ...prevProfile,
             searchConsoleAccessToken: accessToken,
+            searchConsoleRefreshToken: refreshToken, // Add to local profile state
             searchConsoleConnected: true,
             updatedAt: Timestamp.now(),
           };
@@ -308,8 +326,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             onboardingCompleted: false,
             credits: 100,
             seoFocus: '',
-            makeConnected: false,
+            // makeConnected: false, // Removed as it's not in User type
             searchConsoleConnected: false,
+            searchConsoleRefreshToken: result.user.refreshToken, // Store refresh token on initial creation if available
           };
           
           await setDoc(userRef, newUser);
@@ -382,7 +401,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             credits: 0, // Default credits, data might override this if 'credits' is in data
             onboardingCompleted: false, // Default, data will override this
             seoFocus: '', // Default, data will override this
-            makeConnected: false, // Default
+            // makeConnected: false, // Removed
             searchConsoleConnected: false, // Default
             searchConsoleAccessToken: undefined, // Default
             ...dataToUpdate, // Apply the actual updates from 'data' and the new updatedAt

@@ -3,6 +3,7 @@ export interface Site {
   userId: string;
   name: string;
   url: string;
+  gscProperty: string;
   createdAt: any; // Firestore timestamp
   sitemapUrl: string;
   lastScan: any | null; // Firestore timestamp
@@ -10,16 +11,18 @@ export interface Site {
   indexedPages: number;
 }
 
-export interface SitePage {
+export interface Page {
   id: string;
   siteId: string;
-  url: string;
+  url: string; // Represents pageUrl from Firestore
   title: string;
-  lastChecked: any | null; // Firestore timestamp
+  lastCheckedAt: any | null; // Firestore timestamp, was lastChecked in component, but type & backend use lastCheckedAt
   indexed: boolean;
   lastIndexed: any | null; // Firestore timestamp
   indexRequested: boolean;
   indexRequestedAt: any | null; // Firestore timestamp
+  siteUrl: string; // Added: Parent site URL, used in table
+  status: string; // Added: Indexing status from GSC, used in table
 }
 
 export interface IndexingHistory {
@@ -28,6 +31,7 @@ export interface IndexingHistory {
   siteId: string;
   timestamp: any; // Firestore timestamp
   action: 'check' | 'index_request';
-  result: 'indexed' | 'not_indexed' | 'pending' | 'successful' | 'failed';
+  result: string;
+  status: 'indexed' | 'not_indexed' | 'pending' | 'successful' | 'failed';
   creditsUsed: number;
 }

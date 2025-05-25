@@ -11,7 +11,7 @@ import {
   CheckCircle2,
   Clock 
 } from 'lucide-react';
-import { collection, query, where, getDocs, orderBy, limit, addDoc, serverTimestamp, doc, updateDoc, increment } from 'firebase/firestore'; // Added addDoc, serverTimestamp, doc, updateDoc, increment
+import { collection, query, where, getDocs, orderBy, limit, addDoc, serverTimestamp, doc, updateDoc } from 'firebase/firestore'; // Removed increment
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Site, IndexingHistory } from '../../types/site';
@@ -19,6 +19,7 @@ import MetricCard from './components/MetricCard';
 import RecentActivityList from './components/RecentActivityList';
 import CreditsCard from './components/CreditsCard';
 import SiteStatusChart from './components/SiteStatusChart';
+import { getFunctions, httpsCallable } from 'firebase/functions'; // Added import
 
 const DashboardPage: React.FC = () => {
   const { currentUser } = useAuth();
@@ -26,6 +27,7 @@ const DashboardPage: React.FC = () => {
   const [recentHistory, setRecentHistory] = useState<IndexingHistory[]>([]);
   const [loading, setLoading] = useState(true);
   const [isProcessingAction, setIsProcessingAction] = useState(false);
+  const [errorCheckingStatus, setErrorCheckingStatus] = useState<string | null>(null); // Added for error display
   
   // Summary metrics
   const [totalPages, setTotalPages] = useState(0);
@@ -116,61 +118,109 @@ const DashboardPage: React.FC = () => {
 
   const handleCheckAllPages = async () => {
     if (!currentUser || sites.length === 0 || isProcessingAction) return;
+    
     setIsProcessingAction(true);
+    setErrorCheckingStatus(null); // Clear previous errors
     console.log('Starting to check all pages for all sites...');
+
+    const functions = getFunctions();
+    const getSiteIndexingStatus = httpsCallable(functions, 'get_site_indexing_status');
+
+    let overallSuccess = true;
+    let sitesProcessedCount = 0;
 
     try {
       for (const site of sites) {
-        console.log(`Processing site: ${site.name} (${site.id})`);
-        // TODO: Replace with your actual API call to check site status
-        // const response = await fetch(`YOUR_API_ENDPOINT/check-status?siteUrl=${encodeURIComponent(site.url)}`, {
-        //   method: 'POST', // or 'GET'
-        //   headers: {
-        //     'Authorization': `Bearer YOUR_API_KEY_OR_TOKEN`,
-        //     'Content-Type': 'application/json',
-        //   },
-        // });
-        // if (!response.ok) {
-        //   throw new Error(`API error for site ${site.name}: ${response.statusText}`);
-        // }
-        // const result = await response.json();
-        // const { indexedPages, totalPages, creditsUsed } = result; // Adjust based on your API response
-
-        // Simulating API response for now
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate network delay
-        const simulatedCreditsUsed = 1; // Placeholder
-        let newIndexedPages = site.indexedPages || 0;
-        // Simulate finding one new indexed page if not all are indexed
-        if ((site.totalPages || 0) > 0 && newIndexedPages < (site.totalPages || 0)) {
-            newIndexedPages = Math.min(newIndexedPages + 1, site.totalPages || 0);
+        console.log(`Processing site: ${site.name} (${site.id}) - URL: ${site.url}`);
+        
+        if (!site.url) {
+          console.warn(`Site ${site.name} (${site.id}) has no URL. Skipping.`);
+          setErrorCheckingStatus(prev => prev ? `${prev}\nSite ${site.name} has no URL.` : `Site ${site.name} has no URL.`);
+          continue;
         }
 
-        const siteDocRef = doc(db, 'sites', site.id);
-        await updateDoc(siteDocRef, {
-          // indexedPages: indexedPages, // Use actual value from API
-          // totalPages: totalPages, // Use actual value from API, if it can change
-          indexedPages: newIndexedPages, // Using simulated value
-          lastScan: serverTimestamp(),
-        });
-        console.log(`Updated site ${site.name} in Firestore.`);
+        try {
+          const siteIdentifier = site.gscProperty ? site.gscProperty : site.url;
+          const response: any = await getSiteIndexingStatus({ siteUrl: siteIdentifier });
+          const { indexedPages, totalPages: apiTotalPages, creditsUsed, message } = response.data;
 
-        const historyCollectionRef = collection(db, 'indexingHistory');
-        await addDoc(historyCollectionRef, {
-          siteId: site.id,
-          userId: currentUser.uid,
-          timestamp: serverTimestamp(),
-          action: 'site_check_all', // More specific action
-          result: `Checked: ${newIndexedPages}/${site.totalPages || 0} indexed`, // Or more detailed result from API
-          // creditsUsed: creditsUsed, // Use actual value from API
-          creditsUsed: simulatedCreditsUsed, // Using simulated value
-        });
-        console.log(`Added history entry for site ${site.name} check action.`);
+          console.log(`API response for ${site.name}:`, response.data);
+
+          const siteDocRef = doc(db, 'sites', site.id);
+          await updateDoc(siteDocRef, {
+            indexedPages: indexedPages,
+            totalPages: apiTotalPages, // Update total pages from API if it can change
+            lastScan: serverTimestamp(),
+            lastScanStatus: 'success',
+            lastScanMessage: message || 'Successfully checked.',
+          });
+          console.log(`Updated site ${site.name} in Firestore.`);
+
+          const historyCollectionRef = collection(db, 'indexingHistory');
+          await addDoc(historyCollectionRef, {
+            siteId: site.id,
+            userId: currentUser.uid,
+            timestamp: serverTimestamp(),
+            action: 'check',
+            result: `Checked: ${indexedPages}/${apiTotalPages} indexed. ${message || ''}`,
+            creditsUsed: creditsUsed || 0, // Use actual value from API
+            status: 'successful',
+          });
+          console.log(`Added history entry for site ${site.name} check action.`);
+          sitesProcessedCount++;
+
+        } catch (siteError: any) {
+          overallSuccess = false;
+          console.error(`Error processing site ${site.name} (${site.url}) with Firebase function:`, siteError);
+          const errorMessage = siteError.message || 'Unknown error during site check.';
+          setErrorCheckingStatus(prev => prev ? `${prev}\nError for ${site.name}: ${errorMessage}` : `Error for ${site.name}: ${errorMessage}`);
+          
+          const siteDocRef = doc(db, 'sites', site.id);
+          await updateDoc(siteDocRef, {
+            lastScan: serverTimestamp(),
+            lastScanStatus: 'error',
+            lastScanMessage: `Failed: ${errorMessage}`,
+          });
+
+          const historyCollectionRef = collection(db, 'indexingHistory');
+          await addDoc(historyCollectionRef, {
+            siteId: site.id,
+            userId: currentUser.uid,
+            timestamp: serverTimestamp(),
+            action: 'check',
+            result: `Failed to check site. Error: ${errorMessage}`,
+            creditsUsed: 0, // No credits used if the function call itself failed before credit deduction logic
+            status: 'failed',
+          });
+
+          if (siteError.code === 'unauthenticated' && siteError.message.includes("token has expired")) {
+            // Optionally, trigger a global state or redirect for re-authentication
+            console.warn("Google token expired. User needs to re-authenticate.");
+            // Example: authContext.promptReAuth(); 
+          }
+        }
       }
-      console.log('Finished checking all pages for all sites.');
-      await fetchDashboardData(); // Refresh dashboard data
-    } catch (error) {
-      console.error('Error during check all pages:', error);
-      // TODO: Add user-facing error notification
+
+      if (sitesProcessedCount > 0) {
+        console.log(`Finished checking ${sitesProcessedCount} sites.`);
+        await fetchDashboardData(); // Refresh dashboard data
+      } else if (sites.length > 0 && sitesProcessedCount === 0) {
+        console.log('No sites were processed successfully.');
+        // setErrorCheckingStatus might already be set if all sites failed
+      } else {
+        console.log('No sites to process.');
+      }
+
+      if (!overallSuccess && sitesProcessedCount > 0) {
+         setErrorCheckingStatus(prev => prev ? `${prev}\nSome sites failed. Check details above.` : 'Some sites failed. Check details above.');
+      } else if (!overallSuccess && sitesProcessedCount === 0 && sites.length > 0) {
+         setErrorCheckingStatus(prev => prev ? `${prev}\nAll site checks failed.` : 'All site checks failed.');
+      }
+
+
+    } catch (error: any) { // Catch errors from the loop itself or pre-loop setup
+      console.error('Error during the "check all pages" process:', error);
+      setErrorCheckingStatus(`An unexpected error occurred: ${error.message}`);
     } finally {
       setIsProcessingAction(false);
     }
@@ -264,6 +314,17 @@ const DashboardPage: React.FC = () => {
           </Link>
         </div> */}
       </div>
+
+      {/* Display Error Messages */}
+      {errorCheckingStatus && (
+        <div className="mb-4 p-4 bg-red-100 text-red-700 border border-red-300 rounded-md whitespace-pre-line">
+          <div className="flex items-center">
+            <AlertTriangle className="w-5 h-5 mr-2" />
+            <strong>Action Status:</strong>
+          </div>
+          {errorCheckingStatus}
+        </div>
+      )}
 
       {/* Metrics overview */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -398,7 +459,7 @@ const DashboardPage: React.FC = () => {
                 className="w-full py-3 bg-blue-50 hover:bg-blue-100 text-blue-800 font-medium rounded-lg flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Search className="w-4 h-4 mr-2" />
-                Check All Pages (Simulated)
+                Check All Pages
               </button>
               <button 
                 onClick={handleReindexAllMissing}

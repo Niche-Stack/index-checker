@@ -3,7 +3,6 @@ import {
   Calendar, 
   Search, 
   Download,
-  Filter,
   ArrowDownUp
 } from 'lucide-react';
 import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
@@ -11,6 +10,7 @@ import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { IndexingHistory, Site } from '../../types/site';
 import HistoryTable from './components/HistoryTable';
+import { CheckedPagesTable } from './components/CheckedPagesTable';
 
 const HistoryPage: React.FC = () => {
   const { currentUser } = useAuth();
@@ -164,7 +164,9 @@ const HistoryPage: React.FC = () => {
         </div>
         
         <div className="flex-grow md:max-w-xs">
+          <label htmlFor="select-site-filter" className="sr-only">Filter by site</label>
           <select
+            id="select-site-filter"
             className="input w-full"
             value={selectedSite}
             onChange={(e) => setSelectedSite(e.target.value)}
@@ -179,7 +181,9 @@ const HistoryPage: React.FC = () => {
         </div>
         
         <div className="flex-grow md:max-w-xs">
+          <label htmlFor="select-action-filter" className="sr-only">Filter by action</label>
           <select
+            id="select-action-filter"
             className="input w-full"
             value={selectedAction}
             onChange={(e) => setSelectedAction(e.target.value)}
@@ -214,6 +218,11 @@ const HistoryPage: React.FC = () => {
           sites={sites}
           loading={loading}
         />
+      </div>
+
+      {/* Checked Pages Table */}
+      <div className="mt-8">
+        <CheckedPagesTable />
       </div>
     </div>
   );
