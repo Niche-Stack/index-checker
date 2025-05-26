@@ -11,7 +11,7 @@ import {
   CheckCircle2,
   Clock 
 } from 'lucide-react';
-import { collection, query, where, getDocs, orderBy, limit, addDoc, serverTimestamp, doc, updateDoc } from 'firebase/firestore'; // Removed increment
+import { collection, query, where, getDocs, orderBy, limit, serverTimestamp, doc, updateDoc } from 'firebase/firestore'; 
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Site, IndexingHistory } from '../../types/site';
@@ -171,8 +171,8 @@ const DashboardPage: React.FC = () => {
           const {
             status: cloudFnStatus,
             message: cloudFnMessage,
-            urlsQueued,
-            estimatedCredits
+            // urlsQueued, // Removed unused variable
+            // estimatedCredits // Removed unused variable
           } = response.data as { status: string; message: string; urlsQueued?: number; estimatedCredits?: number };
 
 
@@ -238,48 +238,106 @@ const DashboardPage: React.FC = () => {
 
   const handleReindexAllMissing = async () => {
     if (!currentUser || sites.length === 0 || isProcessingAction) return;
+    
     setIsProcessingAction(true);
+    setErrorCheckingStatus(null); // Clear previous errors
     console.log('Starting to reindex missing pages for all sites...');
+
+    const functions = getFunctions();
+    const requestSiteReindexing = httpsCallable(functions, 'request_site_reindexing');
+
+    let overallSuccess = true;
+    let sitesProcessedCount = 0;
 
     try {
       for (const site of sites) {
-        const missingPages = (site.totalPages || 0) - (site.indexedPages || 0);
-        if (missingPages <= 0) {
-          console.log(`No missing pages to reindex for site ${site.name}.`);
+        console.log(`Processing re-index request for site: ${site.name} (${site.id}) - GSC Property: ${site.gscProperty}`);
+        
+        if (!site.gscProperty) {
+          console.warn(`Site ${site.name} (${site.id}) has no GSC Property. Skipping re-index request.`);
+          setErrorCheckingStatus(prev => prev ? `${prev}\nSite ${site.name} has no GSC Property for re-indexing.` : `Site ${site.name} has no GSC Property for re-indexing.`);
           continue;
         }
 
-        console.log(`Requesting reindex for ${missingPages} missing pages on site: ${site.name} (${site.id})`);
-        // TODO: Replace with your actual API call to request re-indexing
-        // const response = await fetch(`YOUR_API_ENDPOINT/reindex-missing`, {
-        //   method: 'POST',
-        //   headers: {
-        //     'Authorization': `Bearer YOUR_API_KEY_OR_TOKEN`,
-        //     'Content-Type': 'application/json',
-        //   },
-        //   body: JSON.stringify({ siteUrl: site.url, missingPagesCount: missingPages })
-        // });
-        // if (!response.ok) {
-        //   throw new Error(`API error for reindexing site ${site.name}: ${response.statusText}`);
-        // }
-        // const result = await response.json();
-        // const { creditsUsed, submissionId } = result; // Adjust based on your API response
+        try {
+          // The backend will find non-indexed pages for this site
+          const response: any = await requestSiteReindexing({ siteUrl: site.gscProperty });
+          const {
+            status: cloudFnStatus,
+            message: cloudFnMessage,
+            urlsQueued,
+            // estimatedCredits // Not currently used for re-indexing in this UI, but available
+          } = response.data as { status: string; message: string; urlsQueued?: number; estimatedCredits?: number };
 
-        // Simulating API response for now
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate network delay
-        // const simulatedCreditsUsedForReindex = missingPages * 1; // Example: 1 credit per page
+          console.log(`Cloud function response for re-indexing ${site.name}:`, response.data);
 
-        const siteDocRef = doc(db, 'sites', site.id);
-        await updateDoc(siteDocRef, {
-          lastScan: serverTimestamp(), // Update last activity timestamp
-        });
-        console.log(`Updated lastScan for site ${site.name}.`);
+          const siteDocRef = doc(db, 'sites', site.id);
+          if (cloudFnStatus === 'pending') {
+            await updateDoc(siteDocRef, {
+              lastReindexRequestAt: serverTimestamp(),
+              lastReindexStatus: 'pending',
+              lastReindexMessage: cloudFnMessage || `Re-indexing task for ${urlsQueued || 'several'} URLs initiated.`,
+            });
+            console.log(`Updated site ${site.name} in Firestore to reflect pending re-index.`);
+            setErrorCheckingStatus(prev => prev ? `${prev}\n${site.name}: ${cloudFnMessage}` : `${site.name}: ${cloudFnMessage}`);
+          } else if (cloudFnStatus === 'no_urls_to_reindex' || cloudFnStatus === 'no_urls_found') {
+            await updateDoc(siteDocRef, {
+              lastReindexRequestAt: serverTimestamp(), // Still update timestamp of attempt
+              lastReindexStatus: 'no_action_needed', // Or a more specific status
+              lastReindexMessage: cloudFnMessage || 'No URLs found requiring re-indexing.',
+            });
+            console.log(`Site ${site.name}: No URLs needed re-indexing.`);
+            setErrorCheckingStatus(prev => prev ? `${prev}\n${site.name}: ${cloudFnMessage}` : `${site.name}: ${cloudFnMessage}`);
+          } else { // Handle other statuses from the cloud function as potential errors or non-pending states
+            overallSuccess = false;
+            await updateDoc(siteDocRef, {
+              lastReindexRequestAt: serverTimestamp(),
+              lastReindexStatus: 'error', // Or use cloudFnStatus if it represents an error
+              lastReindexMessage: `Re-index request failed: ${cloudFnMessage || 'Unknown reason'}`,
+            });
+            console.error(`Error or unexpected status for re-indexing site ${site.name}: ${cloudFnMessage}`);
+            setErrorCheckingStatus(prev => prev ? `${prev}\nError for ${site.name} (re-index): ${cloudFnMessage}` : `Error for ${site.name} (re-index): ${cloudFnMessage}`);
+          }
+          sitesProcessedCount++;
+
+        } catch (siteError: any) {
+          overallSuccess = false;
+          console.error(`Error calling request_site_reindexing for ${site.name} (${site.gscProperty}):`, siteError);
+          const errorMessage = siteError.message || 'Unknown error during re-index request.';
+          setErrorCheckingStatus(prev => prev ? `${prev}\nError for ${site.name} (re-index): ${errorMessage}` : `Error for ${site.name} (re-index): ${errorMessage}`);
+          
+          const siteDocRef = doc(db, 'sites', site.id);
+          await updateDoc(siteDocRef, {
+            lastReindexRequestAt: serverTimestamp(),
+            lastReindexStatus: 'error',
+            lastReindexMessage: `Failed to initiate re-index: ${errorMessage}`,
+          });
+
+          if (siteError.code === 'unauthenticated' && siteError.message.includes("token has expired")) {
+            console.warn("Google token expired. User needs to re-authenticate.");
+          }
+        }
       }
-      console.log('Finished reindexing missing pages for all sites.');
-      await fetchDashboardData(); // Refresh dashboard data
-    } catch (error) {
-      console.error('Error during reindex all missing:', error);
-      // TODO: Add user-facing error notification
+
+      if (sitesProcessedCount > 0) {
+        console.log(`Finished processing re-index requests for ${sitesProcessedCount} sites.`);
+        // No immediate data refresh needed as the backend handles the actual re-indexing
+        // fetchDashboardData(); // Re-enable if you want to show immediate status changes on site doc
+      } else if (sites.length > 0 && sitesProcessedCount === 0) {
+        console.log('No site re-index requests were processed successfully.');
+      } else {
+        console.log('No sites to process for re-indexing.');
+      }
+
+      if (!overallSuccess && sitesProcessedCount > 0) {
+         setErrorCheckingStatus(prev => prev ? `${prev}\nSome site re-index requests failed. Check details.` : 'Some site re-index requests failed. Check details.');
+      } else if (!overallSuccess && sitesProcessedCount === 0 && sites.length > 0) {
+         setErrorCheckingStatus(prev => prev ? `${prev}\nAll site re-index requests failed.` : 'All site re-index requests failed.');
+      }
+
+    } catch (error: any) { // Catch errors from the loop itself or pre-loop setup
+      console.error('Error during the "reindex all missing" process:', error);
+      setErrorCheckingStatus(`An unexpected error occurred during re-index requests: ${error.message}`);
     } finally {
       setIsProcessingAction(false);
     }
@@ -464,7 +522,7 @@ const DashboardPage: React.FC = () => {
                 className="w-full py-3 bg-green-50 hover:bg-green-100 text-green-800 font-medium rounded-lg flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
-                Reindex All Missing (Simulated)
+                Request Reindex All Missing
               </button>
               {/* <button className="w-full py-3 bg-slate-50 hover:bg-slate-100 text-slate-800 font-medium rounded-lg flex items-center justify-center transition-colors">
                 <BarChart3 className="w-4 h-4 mr-2" />

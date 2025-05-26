@@ -4,7 +4,7 @@ import { useAuthState } from './hooks/useAuthState';
 import LoadingScreen from './components/ui/LoadingScreen';
 import MainLayout from './layouts/MainLayout';
 import AuthLayout from './layouts/AuthLayout';
-import LandingPage from './pages/LandingPage';
+import LandingPage from './pages/landing/LandingPage';
 
 // Lazy-loaded pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));

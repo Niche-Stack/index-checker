@@ -15,11 +15,33 @@ import { Site } from '../../../types/site';
 interface SiteListItemProps {
   site: Site;
   onDelete: (siteId: string) => Promise<void>;
+  onScanNow: (siteId: string, siteUrl: string, gscProperty?: string) => Promise<void>; // Added for Scan Now
+  onRequestReindex: (siteId: string, gscProperty: string) => Promise<void>; // Added for Re-index
 }
 
-const SiteListItem: React.FC<SiteListItemProps> = ({ site, onDelete }) => {
+const SiteListItem: React.FC<SiteListItemProps> = ({ site, onDelete, onScanNow, onRequestReindex }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  
+  const [isActionLoading, setIsActionLoading] = useState(false); // For individual item actions
+
+  const handleScanNow = async () => {
+    setIsMenuOpen(false);
+    setIsActionLoading(true);
+    await onScanNow(site.id, site.url, site.gscProperty);
+    setIsActionLoading(false);
+  };
+
+  const handleRequestReindex = async () => {
+    setIsMenuOpen(false);
+    if (!site.gscProperty) {
+      // Optionally, show a toast or alert that gscProperty is required
+      console.warn('Cannot request re-index without gscProperty for site:', site.name);
+      return;
+    }
+    setIsActionLoading(true);
+    await onRequestReindex(site.id, site.gscProperty);
+    setIsActionLoading(false);
+  };
+
   const getStatusIndicator = () => {
     if (!site.totalPages) return null;
     
@@ -97,21 +119,36 @@ const SiteListItem: React.FC<SiteListItemProps> = ({ site, onDelete }) => {
           <div className="relative">
             <button 
               onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200"
+              className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 disabled:opacity-50"
+              disabled={isActionLoading}
             >
-              <MoreVertical className="w-4 h-4 text-slate-500" />
+              {isActionLoading ? <RefreshCw className="w-4 h-4 text-slate-500 animate-spin" /> : <MoreVertical className="w-4 h-4 text-slate-500" />}
             </button>
             
             {isMenuOpen && (
-              <div className="absolute right-0 mt-1 w-48 bg-white rounded-md shadow-lg py-1 z-10 border border-slate-100">
+              <div className="absolute right-0 mt-1 w-56 bg-white rounded-md shadow-lg py-1 z-10 border border-slate-100">
                 <button
-                  className="flex items-center w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
+                  onClick={handleScanNow}
+                  disabled={isActionLoading}
+                  className="flex items-center w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <RefreshCw className="w-4 h-4 mr-2" />
-                  Scan Now
+                  Check Indexing Status
                 </button>
                 <button
-                  className="flex items-center w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-100"
+                  onClick={handleRequestReindex}
+                  disabled={isActionLoading || !site.gscProperty} // Disable if no GSC property
+                  title={!site.gscProperty ? 'GSC Property (e.g., sc-domain:example.com) must be set for this site to request re-indexing.' : 'Request re-indexing for non-indexed pages'}
+                  className="flex items-center w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className="w-4 h-4 mr-2 text-green-600" />
+                  Request Re-index Missing
+                </button>
+                <div className="my-1 border-t border-slate-100"></div> 
+                <button
+                  // onClick={() => { /* TODO: Implement Edit Site */ setIsMenuOpen(false); }}
+                  disabled // TODO: Re-enable when edit functionality is ready
+                  className="flex items-center w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-100 opacity-50 cursor-not-allowed"
                 >
                   <Edit className="w-4 h-4 mr-2" />
                   Edit Site

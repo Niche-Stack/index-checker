@@ -9,6 +9,10 @@ export interface Site {
   lastScan: any | null; // Firestore timestamp
   totalPages: number;
   indexedPages: number;
+  // Added for re-indexing status
+  lastReindexRequestAt?: any | null; // Firestore timestamp
+  lastReindexStatus?: string; // e.g., 'completed', 'completed_with_errors', 'pending', 'failed'
+  lastReindexMessage?: string;
 }
 
 export interface Page {
@@ -23,16 +27,24 @@ export interface Page {
   indextimestamp: any | null; // Firestore timestamp
   siteUrl: string; // Added: Parent site URL, used in table
   status: string; // Added: Indexing status from GSC, used in table
+  lastReindexRequestedAt?: any | null; // Firestore timestamp
 }
 
 export interface IndexingHistory {
   id: string;
-  pageId: string;
+  userId?: string; // Added
   siteId: string;
-  timestamp: any; // Firestore timestamp
-  action: 'check' | 'index_request';
-  result: string;
-  status: 'indexed' | 'not_indexed' | 'pending' | 'processing' | 'successful' | 'failed';
-  creditsUsed: number;
-  estimatedCredits: number;
+  siteUrl?: string; // Added
+  pageId?: string; // Can be empty for site-wide actions
+  timestamp: any; // Firestore timestamp (creation)
+  updatedAt?: any; // Firestore timestamp (last update)
+  completedAt?: any; // Firestore timestamp (completion)
+  action: 'check' | 'index_request' | 'reindex'; // Added 'reindex'
+  status: 'pending' | 'processing' | 'successful' | 'failed' | 'completed_with_errors' | 'indexed' | 'not_indexed' | 'no_urls_to_reindex' | 'no_urls_found'; // Added new statuses
+  message?: string; // For user-facing messages
+  estimatedCredits?: number;
+  creditsUsed?: number;
+  initialItemCount?: number; // For urlsToInspectCount or urlsToProcessCount
+  processedItemCount?: number; // For urlsInspectedCount or urlsProcessedCount by execute function
+  indexedItemCount?: number; // For 'check' action, actual indexed pages from execute function
 }

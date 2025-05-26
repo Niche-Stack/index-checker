@@ -5,7 +5,8 @@ import {
   Globe, 
   RefreshCw
 } from 'lucide-react';
-import { collection, query, where, getDocs, orderBy, doc, deleteDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, orderBy, doc, deleteDoc, updateDoc, serverTimestamp } from 'firebase/firestore'; // Added updateDoc, serverTimestamp
+import { getFunctions, httpsCallable } from 'firebase/functions'; // Added Firebase Functions imports
 import { db } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Site } from '../../types/site';
@@ -18,33 +19,37 @@ const SitesPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [isComingSoonModalOpen, setIsComingSoonModalOpen] = useState(false); // Add state for the modal
+  const [actionError, setActionError] = useState<string | null>(null); // For displaying errors from actions
+  const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null); // For displaying success messages
+
+  const fetchSites = async () => {
+    if (!currentUser) return;
+    setLoading(true);
+    setActionError(null); // Clear previous errors on fetch
+    // setActionSuccessMessage(null); // Optionally clear success messages on refresh
+    try {
+      const sitesQuery = query(
+        collection(db, 'sites'),
+        where('userId', '==', currentUser.uid),
+        orderBy('createdAt', 'desc')
+      );
+      
+      const snapshot = await getDocs(sitesQuery);
+      const sitesData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Site[];
+      
+      setSites(sitesData);
+    } catch (err) {
+      console.error('Error fetching sites:', err);
+      setActionError('Error fetching sites: ' + (err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    if (!currentUser) return;
-    
-    const fetchSites = async () => {
-      setLoading(true);
-      try {
-        const sitesQuery = query(
-          collection(db, 'sites'),
-          where('userId', '==', currentUser.uid),
-          orderBy('createdAt', 'desc')
-        );
-        
-        const snapshot = await getDocs(sitesQuery);
-        const sitesData = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        })) as Site[];
-        
-        setSites(sitesData);
-      } catch (err) {
-        console.error('Error fetching sites:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchSites();
   }, [currentUser]);
 
@@ -56,9 +61,114 @@ const SitesPage: React.FC = () => {
     try {
       await deleteDoc(doc(db, 'sites', siteId));
       setSites(prev => prev.filter(site => site.id !== siteId));
+      setActionSuccessMessage('Site deleted successfully.');
     } catch (err) {
       console.error('Error deleting site:', err);
-      alert('Failed to delete site. Please try again.');
+      // alert('Failed to delete site. Please try again.');
+      setActionError('Failed to delete site: ' + (err as Error).message);
+    }
+  };
+
+  const handleScanNowForSite = async (siteId: string, siteUrl: string, gscProperty?: string) => {
+    console.log(`Requesting scan for site: ${siteId}, URL: ${siteUrl}, GSC: ${gscProperty}`);
+    setActionError(null);
+    setActionSuccessMessage(null);
+    if (!currentUser) {
+      setActionError("User not authenticated.");
+      return;
+    }
+
+    const functions = getFunctions();
+    const getSiteIndexingStatus = httpsCallable(functions, 'get_site_indexing_status');
+    const siteIdentifier = gscProperty || siteUrl;
+
+    try {
+      const response: any = await getSiteIndexingStatus({ siteUrl: siteIdentifier });
+      const { status: cloudFnStatus, message: cloudFnMessage } = response.data as { status: string; message: string };
+
+      const siteDocRef = doc(db, 'sites', siteId);
+      await updateDoc(siteDocRef, {
+        lastScan: serverTimestamp(),
+        lastScanStatus: cloudFnStatus === 'pending' ? 'processing' : (cloudFnStatus || 'queued_with_unknown_status'),
+        lastScanMessage: cloudFnMessage || 'Indexing check initiated.',
+      });
+      setActionSuccessMessage(`Indexing check initiated for ${siteIdentifier}: ${cloudFnMessage}`);
+      // Optionally, refresh just this site's data or all sites after a delay
+      // setTimeout(fetchSites, 5000); // Example: refresh all sites after 5s
+    } catch (error: any) {
+      console.error('Error calling get_site_indexing_status:', error);
+      setActionError(`Error initiating scan for ${siteIdentifier}: ${error.message}`);
+      const siteDocRef = doc(db, 'sites', siteId);
+      try {
+        await updateDoc(siteDocRef, { // Log error to site document as well
+            lastScan: serverTimestamp(),
+            lastScanStatus: 'error',
+            lastScanMessage: `Failed to initiate scan: ${error.message}`,
+        });
+      } catch (updateError) {
+        console.error('Error updating site document with scan error:', updateError);
+      }
+    }
+  };
+
+  const handleRequestReindexForSite = async (siteId: string, gscProperty: string) => {
+    console.log(`Requesting re-index for site: ${siteId}, GSC: ${gscProperty}`);
+    setActionError(null);
+    setActionSuccessMessage(null);
+    if (!currentUser) {
+      setActionError("User not authenticated.");
+      return;
+    }
+    if (!gscProperty) {
+      setActionError("GSC Property is required to request re-indexing.");
+      return;
+    }
+
+    const functions = getFunctions();
+    const requestSiteReindexing = httpsCallable(functions, 'request_site_reindexing');
+
+    try {
+      const response: any = await requestSiteReindexing({ siteUrl: gscProperty });
+      const { status: cloudFnStatus, message: cloudFnMessage, urlsQueued } = response.data as { status: string; message: string; urlsQueued?: number };
+
+      const siteDocRef = doc(db, 'sites', siteId);
+      if (cloudFnStatus === 'pending') {
+        await updateDoc(siteDocRef, {
+          lastReindexRequestAt: serverTimestamp(),
+          lastReindexStatus: 'pending',
+          lastReindexMessage: cloudFnMessage || `Re-indexing task for ${urlsQueued || 'several'} URLs initiated.`,
+        });
+        setActionSuccessMessage(`Re-indexing request for ${gscProperty} is pending: ${cloudFnMessage}`);
+      } else if (cloudFnStatus === 'no_urls_to_reindex' || cloudFnStatus === 'no_urls_found') {
+        await updateDoc(siteDocRef, {
+          lastReindexRequestAt: serverTimestamp(),
+          lastReindexStatus: 'no_action_needed',
+          lastReindexMessage: cloudFnMessage || 'No URLs found requiring re-indexing.',
+        });
+        setActionSuccessMessage(`Re-indexing for ${gscProperty}: ${cloudFnMessage}`);
+      } else {
+        await updateDoc(siteDocRef, {
+          lastReindexRequestAt: serverTimestamp(),
+          lastReindexStatus: 'error',
+          lastReindexMessage: `Re-index request failed: ${cloudFnMessage || 'Unknown reason'}`,
+        });
+        setActionError(`Re-index request for ${gscProperty} failed: ${cloudFnMessage}`);
+      }
+      // Optionally, refresh just this site's data or all sites after a delay
+      // setTimeout(fetchSites, 5000); // Example: refresh all sites after 5s
+    } catch (error: any) {
+      console.error('Error calling request_site_reindexing:', error);
+      setActionError(`Error initiating re-index for ${gscProperty}: ${error.message}`);
+      const siteDocRef = doc(db, 'sites', siteId);
+      try {
+        await updateDoc(siteDocRef, { // Log error to site document as well
+            lastReindexRequestAt: serverTimestamp(),
+            lastReindexStatus: 'error',
+            lastReindexMessage: `Failed to initiate re-index: ${error.message}`,
+        });
+      } catch (updateError) {
+        console.error('Error updating site document with re-index error:', updateError);
+      }
     }
   };
 
@@ -100,6 +210,18 @@ const SitesPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Action Feedback Messages */}
+      {actionError && (
+        <div className="mb-4 p-3 bg-red-100 text-red-700 border border-red-300 rounded-md text-sm">
+          <strong>Error:</strong> {actionError}
+        </div>
+      )}
+      {actionSuccessMessage && (
+        <div className="mb-4 p-3 bg-green-100 text-green-700 border border-green-300 rounded-md text-sm">
+          <strong>Success:</strong> {actionSuccessMessage}
+        </div>
+      )}
+
       {/* Sites list */}
       <div className="card overflow-visible">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center">
@@ -122,6 +244,8 @@ const SitesPage: React.FC = () => {
                 key={site.id} 
                 site={site} 
                 onDelete={handleDeleteSite} 
+                onScanNow={handleScanNowForSite} // Pass the handler
+                onRequestReindex={handleRequestReindexForSite} // Pass the handler
               />
             ))}
           </div>

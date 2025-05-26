@@ -28,6 +28,8 @@ logging.basicConfig(level=logging.INFO)
 # --- Configuration Constants ---
 CREDIT_PER_URL = 1  # Cost per URL inspection
 PUBSUB_TOPIC_ID = "site-indexing-tasks" # REPLACE with your Pub/Sub topic name
+REINDEX_PUBSUB_TOPIC_ID = "site-reindexing-tasks" # New Pub/Sub topic for re-indexing
+CREDIT_PER_REINDEX_URL = 5 # Cost per URL re-index request
 
 # Helper to get project ID
 def get_project_id():
@@ -262,11 +264,11 @@ def _deduct_credits_in_transaction(transaction: firestore.Transaction, user_doc_
     """
     user_snapshot = user_doc_ref.get(transaction=transaction)
     if not user_snapshot.exists:
-        logger.error(f"User document not found for user {user_id_for_logging} during credit transaction.")
-        # This error might not be catchable by the main try-except if transaction commit fails outside.
-        # It's better to ensure user_doc_ref is valid before starting transaction if possible,
-        # but for atomicity, check inside is also good.
-        raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.NOT_FOUND, message="User record not found.")
+        logger.error(f"User document not found for user {user_id_for_logging} during credit deduction.") # Added log
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="User record not found for credit deduction."
+        )
 
     current_credits = user_snapshot.get('credits') or 0
     if current_credits < amount_to_deduct:
@@ -503,6 +505,189 @@ def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
     }
 
 
+# --- Callable Function: requestSiteReindexing ---
+@https_fn.on_call(
+    timeout_sec=60,
+    memory=options.MemoryOption.MB_256,
+    cors=options.CorsOptions(
+        cors_origins=[
+            "http://localhost:5173",
+            "https://indexchecker-534db.web.app",
+            "https://indexchecker-534db.firebaseapp.com"
+        ],
+        cors_methods=["POST", "OPTIONS"]
+    )
+)
+def request_site_reindexing(req: https_fn.CallableRequest) -> dict:
+    """
+    Initiates a re-indexing request for non-indexed pages of a site by publishing a task to Pub/Sub.
+    """
+    logger.info(f"request_site_reindexing called with data: {req.data}, by user: {req.auth.uid if req.auth else 'No auth'}")
+
+    if not req.auth:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
+            message="The function must be called while authenticated."
+        )
+    user_id = req.auth.uid
+    
+    site_url_from_req = req.data.get("siteUrl")
+    if not site_url_from_req:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="The function must be called with a \\'siteUrl\\' argument."
+        )
+
+    # --- Resolve siteId from siteUrl ---
+    site_id_for_pages = None
+    try:
+        sites_query = DB.collection("sites").where("userId", "==", user_id).where("gscProperty", "==", site_url_from_req).limit(1)
+        site_docs_list = list(sites_query.stream())
+        if site_docs_list:
+            site_id_for_pages = site_docs_list[0].id
+            logger.info(f"Resolved siteId '{site_id_for_pages}' for siteUrl '{site_url_from_req}' (user: {user_id})")
+        else:
+            logger.warning(f"No site found for gscProperty '{site_url_from_req}' and user '{user_id}'. Cannot determine siteId.")
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.NOT_FOUND,
+                message=f"Site with URL '{site_url_from_req}' not found or not associated with your account."
+            )
+    except Exception as e:
+        logger.error(f"Error resolving siteId for siteUrl '{site_url_from_req}' (user: {user_id}): {e}", exc_info=True)
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL,
+            message=f"An internal error occurred while verifying the site: {e}"
+        )
+
+    # --- Fetch Non-Indexed URLs for the Site ---
+    urls_to_reindex = []
+    try:
+        logger.info(f"Fetching non-indexed pages for siteId '{site_id_for_pages}', user '{user_id}'.")
+        # GSC Verdicts: PASS, FAIL, NEUTRAL, PARTIAL, UNKNOWN_VERDICT
+        # We consider pages that are not 'PASS' as candidates for re-indexing.
+        # Also exclude pages where inspection itself failed (e.g., ERROR_GSC_API, ERROR_INSPECTION_GENERIC)
+        # as re-requesting indexing for them might not be useful without fixing the underlying issue.
+        pages_query = DB.collection("pages").where("userId", "==", user_id).where("siteId", "==", site_id_for_pages)
+        
+        non_indexed_pages_docs = [
+            doc for doc in pages_query.stream() 
+            if doc.to_dict().get("status") not in ["PASS", "REINDEX_REQUESTED"] and not str(doc.to_dict().get("status", "")).startswith("ERROR_")
+        ]
+
+        if non_indexed_pages_docs:
+            urls_to_reindex = [doc.to_dict()["pageUrl"] for doc in non_indexed_pages_docs if "pageUrl" in doc.to_dict()]
+            logger.info(f"Found {len(urls_to_reindex)} non-indexed URLs for siteId '{site_id_for_pages}'.")
+        else:
+            logger.info(f"No non-indexed URLs found for siteId '{site_id_for_pages}' that require re-indexing.")
+            return {
+                "status": "no_urls_to_reindex",
+                "message": "No pages found that require a re-indexing request for this site.",
+                "siteUrl": site_url_from_req,
+            }
+    except Exception as e:
+        logger.error(f"Error fetching non-indexed pages for siteId '{site_id_for_pages}' (user: {user_id}): {e}", exc_info=True)
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL,
+            message=f"Failed to retrieve page list for re-indexing: {e}"
+        )
+
+    if not urls_to_reindex:
+        return {
+            "status": "no_urls_found", # Consistent with get_site_indexing_status
+            "message": "No URLs found requiring a re-indexing request for this site.",
+            "siteUrl": site_url_from_req,
+        }
+
+    # --- Get User's Google Auth Details (needed for Pub/Sub worker) ---
+    user_auth_details = _get_user_google_auth_details(user_id)
+    if not user_auth_details: # This check is also in _get_authenticated_gsc_client but good to have early
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="Google API authentication details not found or incomplete. Please reconnect your Google Account."
+        )
+        
+    # --- Pre-check Credits ---
+    estimated_credits_to_use = len(urls_to_reindex) * CREDIT_PER_REINDEX_URL
+    user_ref = DB.collection("users").document(user_id)
+    
+    if estimated_credits_to_use > 0: # Only check if there's a cost
+        try:
+            user_doc = user_ref.get()
+            if not user_doc.exists:
+                raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.NOT_FOUND, message="User record not found for credit check.")
+            current_credits = user_doc.to_dict().get('credits', 0)
+            if current_credits < estimated_credits_to_use:
+                raise https_fn.HttpsError(
+                    code=https_fn.FunctionsErrorCode.RESOURCE_EXHAUSTED,
+                    message=f"Insufficient credits. This action requires {estimated_credits_to_use} credits, but you have {current_credits}."
+                )
+        except https_fn.HttpsError:
+            raise 
+        except Exception as e:
+            logger.error(f"Error during credit pre-check for user {user_id} (re-indexing): {e}")
+            raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message="Failed to verify credits for re-indexing.")
+
+    # --- Create Indexing History Record ---
+    indexing_history_ref = DB.collection("indexingHistory").document()
+    indexing_history_id = indexing_history_ref.id
+    try:
+        history_data = {
+            "userId": user_id,
+            "siteId": site_id_for_pages,
+            "siteUrl": site_url_from_req, # Use the gscProperty URL
+            "status": "pending",
+            "action": "reindex", # New action type
+            "pageId": "", # Not applicable for multi-URL reindex request
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "urlsToProcessCount": len(urls_to_reindex), # Renamed for clarity
+            "estimatedCredits": estimated_credits_to_use,
+            "message": f"Re-indexing task for {len(urls_to_reindex)} URLs initiated."
+        }
+        indexing_history_ref.set(history_data)
+        logger.info(f"Created indexingHistory record {indexing_history_id} for re-indexing (user {user_id}, site {site_url_from_req}).")
+    except Exception as e:
+        logger.error(f"Failed to create indexingHistory record for re-indexing (user {user_id}, site {site_url_from_req}): {e}", exc_info=True)
+        # Proceed, but log. Task won't have history if this fails.
+
+    # --- Publish to Pub/Sub ---
+    project_id = get_project_id()
+    if not project_id:
+         raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message="Project ID not configured for Pub/Sub.")
+
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path(project_id, REINDEX_PUBSUB_TOPIC_ID) # Use new topic
+    
+    message_payload = {
+        "userId": user_id,
+        "siteUrl": site_url_from_req, # gscProperty
+        "siteIdForPages": site_id_for_pages,
+        "urlsToReindex": urls_to_reindex,
+        "userAuthDetails": user_auth_details,
+        "creditsToDeduct": estimated_credits_to_use,
+        "indexingHistoryId": indexing_history_id
+    }
+    
+    try:
+        message_bytes = json.dumps(message_payload).encode("utf-8")
+        future = publisher.publish(topic_path, data=message_bytes)
+        future.result() 
+        logger.info(f"Successfully published re-indexing task for user {user_id}, site {site_url_from_req} with {len(urls_to_reindex)} URLs.")
+    except Exception as e:
+        logger.error(f"Failed to publish Pub/Sub message for re-indexing (user {user_id}, site {site_url_from_req}): {e}", exc_info=True)
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL,
+            message=f"Failed to initiate re-indexing task: {e}"
+        )
+
+    return {
+        "status": "pending",
+        "message": f"Re-indexing request for {len(urls_to_reindex)} URLs has been initiated. This will use approximately {estimated_credits_to_use} credits.",
+        "siteUrl": site_url_from_req,
+        "urlsQueued": len(urls_to_reindex),
+        "estimatedCredits": estimated_credits_to_use
+    }
+
+
 # --- Pub/Sub Triggered Function: execute_site_indexing ---
 @pubsub_fn.on_message_published(
     topic=PUBSUB_TOPIC_ID,
@@ -544,14 +729,19 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
             return
         try:
             history_ref = DB.collection("indexingHistory").document(history_id)
+            # Corrected logic: Initialize payload without creditsUsed, add it only if explicitly passed.
             update_payload = {
-                "creditsUsed": firestore.Increment(credits_to_deduct) if credits_to_deduct > 0 else 0,
                 "status": status,
                 "message": message,
                 "updatedAt": firestore.SERVER_TIMESTAMP
             }
             if additional_data:
+                if "creditsUsed" in additional_data and additional_data["creditsUsed"] is not None:
+                    update_payload["creditsUsed"] = additional_data.pop("creditsUsed")
+                
+                # Merge any other relevant fields from additional_data
                 update_payload.update(additional_data)
+            
             history_ref.update(update_payload)
             logger.info(f"Updated indexingHistory {history_id} to status {status} for user {user_id}, site {site_url}.")
         except Exception as e_hist:
@@ -567,7 +757,7 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
             logger.info(f"Successfully deducted {credits_to_deduct} credits for user {user_id} for site {site_url}.")
             # Update history after successful deduction (or if no deduction needed)
             if indexing_history_id: # Check if ID exists
-                 update_indexing_history(indexing_history_id, "pending", f"Successfully deducted {credits_to_deduct} credits. Starting GSC processing.", {"actualCreditsUsed": credits_to_deduct if credits_to_deduct > 0 else 0})
+                 update_indexing_history(indexing_history_id, "pending", f"Successfully deducted {credits_to_deduct} credits. Starting GSC processing.", {"creditsUsed": credits_to_deduct if credits_to_deduct > 0 else 0})
 
         except https_fn.HttpsError as e:
             logger.error(f"Credit deduction HttpsError for user {user_id}, site {site_url}: {e.message}. Task will not proceed.")
@@ -581,7 +771,7 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
         logger.info(f"No credits to deduct for user {user_id}, site {site_url} (credits_to_deduct={credits_to_deduct}).")
         credits_deducted_successfully = True # Effectively, as no deduction was needed.
         if indexing_history_id: # Check if ID exists
-            update_indexing_history(indexing_history_id, "pending", "No credits to deduct. Starting GSC processing.", {"actualCreditsUsed": 0})
+            update_indexing_history(indexing_history_id, "pending", "No credits to deduct. Starting GSC processing.", {"creditsUsed": 0})
 
 
     # --- 2. Initialize Google Search Console API ---
@@ -593,7 +783,7 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
         if credits_deducted_successfully and credits_to_deduct > 0:
             user_ref.update({"credits": firestore.Increment(credits_to_deduct)})
             logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} due to GSC client init failure for site {site_url}.")
-        update_indexing_history(indexing_history_id, "failed", f"GSC client initialization failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_to_deduct if credits_deducted_successfully and credits_to_deduct > 0 else 0})
+        update_indexing_history(indexing_history_id, "failed", f"GSC client initialization failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
         return # Stop processing
     except Exception as e:
         logger.error(f"Unexpected error initializing GSC client for user {user_id} (site {site_url}): {e}", exc_info=True)
@@ -804,3 +994,212 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
     # This information is now logged by the background function and stored in Firestore.
     # If you need to communicate completion status back to the user, consider writing to a 'tasks' collection in Firestore
     # that the frontend can monitor, or use another notification mechanism.
+
+
+# --- Pub/Sub Triggered Function: execute_site_reindexing ---
+@pubsub_fn.on_message_published(
+    topic=REINDEX_PUBSUB_TOPIC_ID, # New topic
+    timeout_sec=540, 
+    memory=options.MemoryOption.MB_256, # Likely less memory needed than full inspection
+)
+def execute_site_reindexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublishedData]) -> None:
+    """
+    Background function to process site re-indexing tasks from Pub/Sub.
+    Currently simulates re-indexing by updating Firestore.
+    """
+    try:
+        message_data_bytes = event.data.message.data
+        message_data_str = base64.b64decode(message_data_bytes).decode('utf-8')
+        payload = json.loads(message_data_str)
+        
+        user_id = payload["userId"]
+        site_url = payload["siteUrl"] # This is gscProperty
+        site_id_for_pages = payload["siteIdForPages"]
+        urls_to_reindex = payload["urlsToReindex"]
+        user_auth_details = payload["userAuthDetails"] # Contains tokens
+        credits_to_deduct = payload["creditsToDeduct"]
+        indexing_history_id = payload.get("indexingHistoryId")
+
+        logger.info(f"execute_site_reindexing started for user {user_id}, site {site_url}. URLs: {len(urls_to_reindex)}, Credits: {credits_to_deduct}, HistoryID: {indexing_history_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to parse Pub/Sub message for re-indexing: {e}", exc_info=True)
+        return 
+
+    user_ref = DB.collection("users").document(user_id)
+    credits_deducted_successfully = False
+
+    # --- Update Indexing History Helper (specific for re-indexing or adapt existing one) ---
+    def update_reindex_history(history_id: str | None, status: str, message: str, additional_data: dict | None = None):
+        if not history_id:
+            logger.warning(f"No indexingHistoryId provided, cannot update re-index history for user {user_id}, site {site_url}.")
+            return
+        try:
+            history_ref = DB.collection("indexingHistory").document(history_id)
+            update_payload = {
+                "status": status,
+                "message": message,
+                "updatedAt": firestore.SERVER_TIMESTAMP
+            }
+            if additional_data: # Ensure creditsUsed is handled correctly
+                if "creditsUsed" in additional_data and additional_data["creditsUsed"] is not None :
+                     # If credits_to_deduct was 0, this ensures creditsUsed is set to 0 not an Increment object
+                    update_payload["creditsUsed"] = additional_data.pop("creditsUsed")
+
+                update_payload.update(additional_data)
+            
+            history_ref.update(update_payload)
+            logger.info(f"Updated re-indexing history {history_id} to status {status} for user {user_id}, site {site_url}.")
+        except Exception as e_hist:
+            logger.error(f"Failed to update re-indexing history {history_id} for user {user_id}, site {site_url}: {e_hist}", exc_info=True)
+
+    # --- 1. Credit Deduction (if applicable) ---
+    if credits_to_deduct > 0:
+        try:
+            transaction = DB.transaction()
+            _deduct_credits_in_transaction(transaction, user_ref, credits_to_deduct, user_id)
+            credits_deducted_successfully = True
+            logger.info(f"Successfully deducted {credits_to_deduct} credits for user {user_id} for re-indexing site {site_url}.")
+            update_reindex_history(indexing_history_id, "processing", f"Successfully deducted {credits_to_deduct} credits. Starting re-index requests.", {"creditsUsed": credits_to_deduct})
+        except https_fn.HttpsError as e:
+            logger.error(f"Credit deduction HttpsError for re-indexing (user {user_id}, site {site_url}): {e.message}.")
+            update_reindex_history(indexing_history_id, "failed", f"Credit deduction failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsUsed": 0})
+            return
+        except Exception as e:
+            logger.error(f"Generic credit deduction failed for re-indexing (user {user_id}, site {site_url}): {e}", exc_info=True)
+            update_reindex_history(indexing_history_id, "failed", f"Credit deduction failed: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsUsed": 0})
+            return
+    else:
+        logger.info(f"No credits to deduct for re-indexing (user {user_id}, site {site_url}).")
+        credits_deducted_successfully = True # Effectively true
+        update_reindex_history(indexing_history_id, "processing", "No credits to deduct. Starting re-index requests.", {"creditsUsed": 0})
+
+    # --- 2. Initialize Google Search Console API (or Indexing API if used in future) ---
+    # For now, we might not need the client if we're just simulating.
+    # search_console = None
+    # try:
+    #     search_console = _get_authenticated_gsc_client(user_auth_details, user_id)
+    # except Exception as e:
+    #     logger.error(f"Failed to initialize GSC client for re-indexing (user {user_id}, site {site_url}): {e}")
+    #     if credits_deducted_successfully and credits_to_deduct > 0:
+    #         user_ref.update({"credits": firestore.Increment(credits_to_deduct)}) # Refund
+    #         logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} (re-indexing GSC init fail).")
+    #     update_reindex_history(indexing_history_id, "failed", f"GSC client initialization failed: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
+    #     return
+    logger.info(f"GSC client initialization skipped for simulated re-indexing (user {user_id}, site {site_url}).")
+
+
+    current_timestamp = datetime.datetime.now(datetime.timezone.utc)
+    urls_reindex_requested_count = 0
+    
+    # --- 3. Simulate Re-indexing URLs & Update Page Statuses ---
+    if not urls_to_reindex:
+        logger.info(f"No URLs provided in payload for re-indexing (user {user_id}, site {site_url}).")
+        update_reindex_history(indexing_history_id, "successful", "No URLs were provided in the payload to re-index.", {"completedAt": firestore.SERVER_TIMESTAMP, "urlsProcessedCount": 0})
+        return
+
+    logger.info(f"Simulating re-index requests for {len(urls_to_reindex)} URLs for site: {site_url}, user: {user_id}")
+    
+    # Batch update for page statuses
+    batch = DB.batch()
+    pages_collection_ref = DB.collection("pages")
+    updated_page_ids_for_logging = []
+
+    for url_to_reindex_item in urls_to_reindex:
+        # Actual Indexing API call would be:
+        # try:
+        #   indexing_service.urlNotifications().publish(body={'url': url_to_reindex_item, 'type': 'URL_UPDATED'}).execute()
+        #   logger.info(f"Successfully submitted {url_to_reindex_item} to Indexing API for site {site_url}.")
+        #   urls_reindex_requested_count += 1
+        # except Exception as e:
+        #   logger.error(f"Failed to submit {url_to_reindex_item} to Indexing API: {e}")
+        # For simulation:
+        logger.info(f"Simulated: Requested re-indexing for URL {url_to_reindex_item} for site {site_url}")
+        urls_reindex_requested_count += 1
+
+        # Find and update page document
+        # This query can be slow if done one-by-one in a loop.
+        # Consider if page IDs can be passed or if a more efficient update is needed.
+        # For now, proceed with individual queries and batched writes.
+        page_query = pages_collection_ref.where("userId", "==", user_id).where("siteId", "==", site_id_for_pages).where("pageUrl", "==", url_to_reindex_item).limit(1)
+        page_docs = list(page_query.stream())
+        if page_docs:
+            page_doc_ref = page_docs[0].reference
+            batch.update(page_doc_ref, {
+                "status": "REINDEX_REQUESTED", # New status
+                "lastReindexRequestedAt": current_timestamp
+            })
+            updated_page_ids_for_logging.append(page_docs[0].id)
+        else:
+            logger.warning(f"Could not find page document for URL {url_to_reindex_item} (siteId {site_id_for_pages}) to update status to REINDEX_REQUESTED.")
+        
+        time.sleep(0.05) # Small delay if there were actual API calls with quotas
+
+    if updated_page_ids_for_logging:
+        try:
+            batch.commit()
+            logger.info(f"Successfully batched updates for {len(updated_page_ids_for_logging)} pages to REINDEX_REQUESTED for site {site_url}, user {user_id}.")
+        except Exception as e:
+            logger.error(f"Error committing batch of page updates for re-indexing (user {user_id}, site {site_url}): {e}", exc_info=True)
+            # Credits not rolled back as "work" (simulated) was done.
+            update_reindex_history(
+                indexing_history_id, 
+                "failed", 
+                f"Re-indexing simulated for {urls_reindex_requested_count} URLs, but failed to update all page statuses in Firestore: {str(e)}",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": urls_reindex_requested_count # urls_reindex_requested_count is a better name here
+                }
+            )
+            # Continue to update site document if possible, but history shows partial failure.
+
+
+    logger.info(f"Re-index request simulation complete for {site_url} (user {user_id}). Requested: {urls_reindex_requested_count}/{len(urls_to_reindex)}")
+
+    # --- 4. Update the parent Site Document ---
+    if site_id_for_pages:
+        site_doc_ref = DB.collection("sites").document(site_id_for_pages)
+        try:
+            site_update_data = {
+                "lastReindexRequestAt": current_timestamp, # New field
+                "lastReindexStatus": "completed" if urls_reindex_requested_count == len(urls_to_reindex) else "completed_with_errors",
+                "lastReindexMessage": f"Re-indexing requested for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs."
+            }
+            site_doc_ref.update(site_update_data)
+            logger.info(f"Successfully updated site document '{site_id_for_pages}' for user '{user_id}' after re-indexing request.")
+            
+            update_reindex_history(
+                indexing_history_id,
+                "successful" if urls_reindex_requested_count == len(urls_to_reindex) else "completed_with_errors",
+                f"Re-indexing requested for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs.",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": urls_reindex_requested_count
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error updating site document '{site_id_for_pages}' after re-indexing (user '{user_id}'): {e}", exc_info=True)
+            update_reindex_history(
+                indexing_history_id,
+                "failed", # Or a more specific status
+                f"Re-indexing processed for {urls_reindex_requested_count} URLs, but failed to update site summary: {str(e)}",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": urls_reindex_requested_count
+                }
+            )
+    else:
+        logger.warning(f"site_id_for_pages was missing. Cannot update parent site document after re-indexing for user '{user_id}', siteUrl '{site_url}'.")
+        # Update history if site_id was missing but processing happened
+        if indexing_history_id:
+             update_reindex_history(
+                indexing_history_id,
+                "successful" if urls_reindex_requested_count == len(urls_to_reindex) and urls_reindex_requested_count > 0 else "failed",
+                f"Re-indexing processed for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs. Site summary not updated (siteId missing).",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": urls_reindex_requested_count
+                }
+            )
+
+    logger.info(f"execute_site_reindexing finished for user {user_id}, site {site_url}. Processed {urls_reindex_requested_count} of {len(urls_to_reindex)} URLs.")

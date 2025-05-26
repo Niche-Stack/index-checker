@@ -17,17 +17,22 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
   const getActivityIcon = (activity: IndexingHistory) => {
     if (activity.action === 'check') {
       if (activity.status === 'successful') {
+      return <CheckCircle className="w-5 h-5 text-green-600" />;
+      } else if (activity.status === 'pending' || activity.status === 'processing') {
+      return <RefreshCw className="w-5 h-5 text-blue-600" />;
+      } else {
+      return <AlertTriangle className="w-5 h-5 text-amber-600" />;
+      }
+    } else if (activity.action === 'index_request' || activity.action === 'reindex') {
+      if (activity.status === 'successful') {
         return <CheckCircle className="w-5 h-5 text-green-600" />;
       } else if (activity.status === 'pending' || activity.status === 'processing') {
         return <RefreshCw className="w-5 h-5 text-blue-600" />;
       } else {
-        return <AlertTriangle className="w-5 h-5 text-amber-600" />;
+        return <AlertTriangle className="w-5 h-5 text-red-600" />;
       }
-    } else {
-      return activity.status === 'successful' || activity.status === 'pending' || activity.status === 'processing'
-        ? <RefreshCw className="w-5 h-5 text-blue-600" />
-        : <AlertTriangle className="w-5 h-5 text-red-600" />;
     }
+    return null;
   };
 
   const getActivityDescription = (activity: IndexingHistory): string => {
@@ -92,7 +97,7 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
           </div>
           <div className="text-right">
             <div className="text-xs font-medium text-slate-700 bg-slate-100 py-1 px-2 rounded-full">
-              {activity.status == 'successful' ? activity.creditsUsed + " credits" : activity.estimatedCredits + " credits estimated"}
+              {activity.status == 'successful' ? activity.creditsUsed + " credits used" : activity.estimatedCredits + " credits estimated"}
             </div>
           </div>
         </div>
