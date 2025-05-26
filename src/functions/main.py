@@ -2,17 +2,20 @@
 # To get started, simply uncomment the below code or create your own.
 # Deploy with `firebase deploy`
 
-from firebase_functions import https_fn, options # Added options
+from firebase_functions import https_fn, options, pubsub_fn # Added pubsub_fn
 from firebase_admin import initialize_app, firestore
 import logging
 import time
 import datetime
-import os # Added for environment variables
+import os
+import json # For Pub/Sub message payload
+import base64 # For decoding Pub/Sub message data
+from google.cloud import pubsub_v1 # For Pub/Sub publisher client
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError as GoogleHttpError
-from google.auth.transport.requests import Request as GoogleAuthRequest # Added for token refresh
-from google.auth.exceptions import RefreshError as GoogleRefreshError # Added for token refresh
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.auth.exceptions import RefreshError as GoogleRefreshError
 
 # Initialize Firebase Admin SDK
 initialize_app()
@@ -20,10 +23,21 @@ DB = firestore.client()
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO) # Ensures logs are captured by Cloud Logging
+logging.basicConfig(level=logging.INFO)
 
-# Set global options for all functions if needed, or per function
-# options.set_global_options(region=options.SupportedRegion.EUROPE_WEST1) # Example, adjust to your region
+# --- Configuration Constants ---
+CREDIT_PER_URL = 1  # Cost per URL inspection
+PUBSUB_TOPIC_ID = "site-indexing-tasks" # REPLACE with your Pub/Sub topic name
+
+# Helper to get project ID
+def get_project_id():
+    project_id = os.environ.get("GCP_PROJECT") # Firebase sets this
+    if not project_id:
+        project_id = "indexchecker-534db" # Fallback
+    if not project_id:
+        logger.error("Google Cloud Project ID could not be determined. Pub/Sub publishing will likely fail.")
+        # Depending on strictness, you might raise an error or allow to proceed with a warning.
+    return project_id
 
 # --- Interfaces (as Pydantic models or TypedDicts for clarity, optional for runtime) ---
 # For simplicity, we'll use dictionaries and rely on runtime checks or comments.
@@ -165,15 +179,27 @@ def _get_authenticated_gsc_client(auth_details: dict, user_id: str) -> Resource:
                 new_expiry_ms = int(new_expiry_datetime.timestamp() * 1000)
 
                 user_doc_ref = DB.collection("users").document(user_id)
-                user_doc_ref.update({
+                update_data = {
                     "searchConsoleAccessToken": new_access_token,
                     "searchConsoleAccessTokenExpiryTime": new_expiry_ms
                     # refresh_token usually remains the same, but some flows might issue a new one.
                     # If credentials.refresh_token changed, update it too.
                     # "searchConsoleRefreshToken": credentials.refresh_token 
-                })
+                }
+                # If a new refresh token was issued (rare for Google, but possible), update it too.
+                if credentials.refresh_token != refresh_token: # Check if it changed
+                    update_data["searchConsoleRefreshToken"] = credentials.refresh_token
+                    logger.info(f"Google refresh token was updated for user {user_id}.")
+
+                user_doc_ref.update(update_data)
                 logger.info(f"Successfully refreshed Google access token for user {user_id}. New expiry (ms): {new_expiry_ms}")
-                # access_token = new_access_token # Not strictly needed as credentials.token is updated
+                # Update auth_details in memory for the current operation if it's mutable and passed by reference,
+                # or rely on the updated credentials object.
+                auth_details["searchConsoleAccessToken"] = new_access_token
+                auth_details["searchConsoleAccessTokenExpiryTime"] = new_expiry_ms
+                if "searchConsoleRefreshToken" in update_data:
+                     auth_details["searchConsoleRefreshToken"] = update_data["searchConsoleRefreshToken"]
+
 
             except GoogleRefreshError as e:
                 error_message_str = str(e) # For logging
@@ -255,20 +281,20 @@ def _deduct_credits_in_transaction(transaction: firestore.Transaction, user_doc_
 
 # --- Callable Function: getSiteIndexingStatus ---
 @https_fn.on_call(
-    timeout_sec=300,
+    timeout_sec=60, # Reduced timeout as it's now just queueing
     memory=options.MemoryOption.MB_256,
     cors=options.CorsOptions(
         cors_origins=[
-            "http://localhost:5173", # Local development
-            "https://indexchecker-534db.web.app", # Deployed app
-            "https://indexchecker-534db.firebaseapp.com" # Deployed app
+            "http://localhost:5173",
+            "https://indexchecker-534db.web.app",
+            "https://indexchecker-534db.firebaseapp.com"
         ],
-        cors_methods=["POST", "OPTIONS"] # Allow POST and OPTIONS for preflight
+        cors_methods=["POST", "OPTIONS"]
     )
 )
 def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
     """
-    Checks the indexing status of pages for a given siteUrl using Google Search Console API.
+    Initiates the indexing status check for a siteUrl by publishing a task to Pub/Sub.
     """
     logger.info(f"get_site_indexing_status called with data: {req.data}, by user: {req.auth.uid if req.auth else 'No auth'}")
 
@@ -289,20 +315,16 @@ def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
     # --- Resolve siteId from siteUrl ---
     site_id_for_pages = None
     try:
-        # Assuming 'sites' collection has documents with 'userId' and 'url' fields.
-        # 'url' field in 'sites' collection should store the canonical site URL.
         sites_query = DB.collection("sites").where("userId", "==", user_id).where("gscProperty", "==", site_url).limit(1)
-        
-        site_docs_list = list(sites_query.stream()) # Execute and get list
-
+        site_docs_list = list(sites_query.stream())
         if site_docs_list:
             site_id_for_pages = site_docs_list[0].id
             logger.info(f"Resolved siteId \'{site_id_for_pages}\' for siteUrl \'{site_url}\' (user: {user_id}).")
         else:
-            logger.warning(f"Site not found in 'sites' collection for siteUrl '{site_url}' (user: {user_id}). Cannot link pages to a site document.")
+            logger.warning(f"Site not found for siteUrl '{site_url}' (user: {user_id}).")
             raise https_fn.HttpsError(
                 code=https_fn.FunctionsErrorCode.NOT_FOUND,
-                message=f"The site \'{site_url}\' is not registered under your account. Please add or verify the site configuration."
+                message=f"The site \'{site_url}\' is not registered under your account."
             )
     except Exception as e:
         logger.error(f"Error resolving siteId for siteUrl \'{site_url}\' (user: {user_id}): {e}", exc_info=True)
@@ -310,78 +332,43 @@ def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
             code=https_fn.FunctionsErrorCode.INTERNAL,
             message=f"An internal error occurred while verifying the site: {e}"
         )
-    # site_id_for_pages is now set, or function has exited.
 
-    # --- 1. Credit Check & Deduction ---
-    credits_to_use = 10  # Define cost for this operation
-    user_ref = DB.collection("users").document(user_id)
-    credits_deducted_successfully = False
-
-    try:
-        transaction = DB.transaction()
-        _deduct_credits_in_transaction(transaction, user_ref, credits_to_use, user_id)
-        # The transaction.commit() happens implicitly when the @firestore.transactional function returns,
-        # or explicitly if you run transaction.commit()
-        # For this setup, the transaction is committed if _deduct_credits_in_transaction doesn't raise an error.
-        credits_deducted_successfully = True # Assume success if no exception from transactional function
-        logger.info(f"Successfully deducted {credits_to_use} credits for user {user_id}.")
-    except https_fn.HttpsError as e: # Catch HttpsError from _deduct_credits_in_transaction
-        logger.error(f"Credit deduction HttpsError for user {user_id}: {e.message}")
-        raise e # Re-raise the specific HttpsError
-    except Exception as e:
-        logger.error(f"Generic credit deduction failed for user {user_id}: {e}")
-        raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to process credits: {e}")
-
-
-    # --- 2. Get User's Google Auth Details ---
+    # --- Get User's Google Auth Details ---
     user_auth_details = _get_user_google_auth_details(user_id)
     if not user_auth_details:
-        if credits_deducted_successfully: # Rollback credits
-            user_ref.update({"credits": firestore.Increment(credits_to_use)})
-            logger.info(f"Rolled back {credits_to_use} credits for user {user_id} due to missing Google auth details.")
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
-            message="Google API authentication details (searchConsoleAccessToken, searchConsoleAccessTokenExpiryTime) not found or incomplete in your user profile. Please ensure your Google Account is connected and tokens are up-to-date."
+            message="Google API authentication details not found or incomplete. Please reconnect your Google Account."
         )
 
-    # --- 3. Initialize Google Search Console API ---
+    # --- Initialize Google Search Console API ---
     try:
         search_console = _get_authenticated_gsc_client(user_auth_details, user_id)
-    except https_fn.HttpsError as e: # Catch HttpsError from _get_authenticated_gsc_client (e.g. token expired)
+    except https_fn.HttpsError as e:
         logger.error(f"Failed to initialize Search Console client for user {user_id}: {e.message}")
-        if credits_deducted_successfully: # Rollback credits
-            user_ref.update({"credits": firestore.Increment(credits_to_use)})
-            logger.info(f"Rolled back {credits_to_use} credits for user {user_id} due to auth client init failure.")
-        raise e # Re-raise
-    except Exception as e: # Catch any other unexpected error during client init
+        raise e
+    except Exception as e:
         logger.error(f"Unexpected error initializing Search Console client for user {user_id}: {e}")
-        if credits_deducted_successfully:
-            user_ref.update({"credits": firestore.Increment(credits_to_use)})
-            logger.info(f"Rolled back {credits_to_use} credits for user {user_id} due to unexpected auth client init failure.")
         raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Unexpected error initializing GSC client: {e}")
 
-
-    # --- 4. Fetch Sitemaps and Inspect URLs ---
-    total_pages_inspected = 0
-    indexed_pages_count = 0
+    # --- Fetch Sitemaps and Analytics URLs (to determine number of URLs) ---
     urls_to_inspect = []
-    api_message = "Process initiated."
-    urls_to_inspect_dict = {}
-
     try:
-        # Use a set to automatically handle duplicates from different sources
         unique_urls_to_inspect = set()
         analytics_urls_count = 0
         sitemap_urls_count = 0
-
         logger.info(f"Fetching URLs from Search Analytics and Sitemaps for site: {site_url}, user: {user_id}")
-
-        # 1. Fetch from Search Analytics (provides recently active/discovered URLs)
+        
+        # 1. Fetch from Search Analytics
         try:
-            analytics_request_body = {"dimensions": ["page"]} # Defaults to last 90 days
+            end_date = datetime.date.today()
+            start_date = end_date - datetime.timedelta(days=180)
+            analytics_request_body = {
+                "dimensions": ["page"],
+                "startDate": start_date.strftime("%Y-%m-%d"),
+                "endDate": end_date.strftime("%Y-%m-%d")
+            }
             analytics_query_result = search_console.searchanalytics().query(siteUrl=site_url, body=analytics_request_body).execute()
-            # logger.info("Search Analytics query response: %s", analytics_query_result) # Can be very verbose
-            
             if analytics_query_result and 'rows' in analytics_query_result:
                 for row in analytics_query_result['rows']:
                     if row.get('keys') and row['keys'][0]:
@@ -390,188 +377,430 @@ def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
                             unique_urls_to_inspect.add(page_url)
                             analytics_urls_count +=1
                 logger.info(f"Added {analytics_urls_count} URLs from search analytics for {site_url}.")
-            else:
-                logger.info(f"No page data returned from search analytics query for {site_url}.")
         except GoogleHttpError as ghe:
-            logger.error(f"Google API Error fetching search analytics for {site_url}: {ghe}. Proceeding with sitemaps.")
+            logger.warning(f"Google API Error fetching search analytics for {site_url}: {ghe}. Proceeding with sitemaps.")
         except Exception as e:
-            logger.error(f"Error fetching search analytics for {site_url}: {e}. Proceeding with sitemaps.")
+            logger.warning(f"Error fetching search analytics for {site_url}: {e}. Proceeding with sitemaps.")
 
-        # 2. Fetch from Sitemaps (primary source for "all pages" intended by site owner)
-        sitemaps_processed_count = 0
+        # 2. Fetch from Sitemaps
         try:
             sitemaps_list_response = search_console.sitemaps().list(siteUrl=site_url).execute()
             if sitemaps_list_response and sitemaps_list_response.get('sitemap'):
-                sitemap_entries = sitemaps_list_response.get('sitemap')
-                logger.info(f"Found {len(sitemap_entries)} sitemap(s) listed in GSC for {site_url}.")
-                for sitemap_meta in sitemap_entries:
+                for sitemap_meta in sitemaps_list_response.get('sitemap'):
                     feedpath = sitemap_meta.get('path')
-                    if not feedpath:
-                        logger.warning(f"Sitemap entry found without a path for {site_url}: {sitemap_meta}")
-                        continue
-                    
-                    sitemaps_processed_count += 1
-                    logger.info(f"Processing sitemap: {feedpath} for {site_url}")
+                    if not feedpath: continue
                     try:
                         sitemap_details = search_console.sitemaps().get(siteUrl=site_url, feedpath=feedpath).execute()
-                        
                         if sitemap_details and sitemap_details.get('contents'):
-                            current_sitemap_urls_added = 0
                             for content_entry in sitemap_details.get('contents'):
-                                # Assuming 'path' in 'contents' are page URLs.
-                                # A more robust solution would check content_entry.get('type') for 'sitemap' (index) and recurse.
                                 page_url = content_entry.get('path')
-                                if page_url:
-                                    if page_url not in unique_urls_to_inspect:
-                                        unique_urls_to_inspect.add(page_url)
-                                        sitemap_urls_count += 1
-                                        current_sitemap_urls_added +=1
-                            if current_sitemap_urls_added > 0:
-                                logger.info(f"Added {current_sitemap_urls_added} new URLs from sitemap: {feedpath}")
-                        else:
-                            logger.info(f"Sitemap {feedpath} has no 'contents' field or could not be processed. It might be empty, pending, or an index file not expanded by this version.")
-                            if sitemap_details and sitemap_details.get('isSitemapsIndex'):
-                                logger.warning(f"Sitemap {feedpath} is a sitemap index. This version does not recursively parse sitemap indexes. URLs from its sub-sitemaps might be missed if they are not also listed individually or processed by GSC into a flat list for .get().")
-                    except GoogleHttpError as ghe_sitemap:
-                        logger.error(f"Google API Error processing sitemap {feedpath} for {site_url}: {ghe_sitemap}")
+                                if page_url and page_url not in unique_urls_to_inspect:
+                                    unique_urls_to_inspect.add(page_url)
+                                    sitemap_urls_count += 1
                     except Exception as e_sitemap:
                         logger.error(f"Error processing sitemap {feedpath} for {site_url}: {e_sitemap}")
-            else:
-                logger.info(f"No sitemaps found or listed for {site_url} in GSC.")
-        except GoogleHttpError as ghe_sitemaps_list:
-            logger.error(f"Google API Error listing sitemaps for {site_url}: {ghe_sitemaps_list}")
         except Exception as e_sitemaps_list:
-            logger.error(f"Error listing sitemaps for {site_url}: {e_sitemaps_list}")
-
+            logger.warning(f"Error listing/processing sitemaps for {site_url}: {e_sitemaps_list}")
+        
         urls_to_inspect = list(unique_urls_to_inspect)
-        urls_to_inspect_dict = {url: "" for url in urls_to_inspect} 
-        total_pages_inspected = len(urls_to_inspect)
+        logger.info(f"Collected {len(urls_to_inspect)} unique URLs for {site_url} ({analytics_urls_count} from analytics, {sitemap_urls_count} new from sitemaps).")
 
-        if not urls_to_inspect:
-            api_message = "Could not retrieve any URLs to inspect from Search Analytics or Sitemaps. Ensure the site has GSC activity, sitemaps are registered and processed, or check GSC for errors."
-            logger.warning(f"{api_message} (User: {user_id}, Site: {site_url})")
-        else:
-            api_message = f"Collected {total_pages_inspected} unique URLs for inspection ({analytics_urls_count} from analytics, {sitemap_urls_count} new from sitemaps)."
-            logger.info(api_message + f" (User: {user_id}, Site: {site_url})")
+    except GoogleHttpError as e:
+        logger.error(f"Google API Error during URL collection for {site_url} (user {user_id}): {e}")
+        raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message=f"GSC API Error during URL collection: {e._get_reason()}")
+    except Exception as e:
+        logger.error(f"Unexpected error during URL collection for {site_url} (user {user_id}): {e}", exc_info=True)
+        raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message=f"Failed to collect URLs: {e}")
 
-        if urls_to_inspect:
-            logger.info(f"Inspecting {len(urls_to_inspect)} URLs for site: {site_url}")
-            for url_to_inspect in urls_to_inspect:
-                try:
-                    time.sleep(0.2)  # Small delay to respect QPS limits
-
-                    inspection_result = search_console.urlInspection().index().inspect(
-                        body={"inspectionUrl": url_to_inspect, "siteUrl": site_url}
-                    ).execute()
-                    
-                    verdict = inspection_result.get("inspectionResult", {}).get("indexStatusResult", {}).get("verdict")
-
-                    urls_to_inspect_dict[url_to_inspect] = verdict  # Store the verdict for each URL
-
-                    if verdict in ["PASS", "NEUTRAL"]: # Consider NEUTRAL as indexed or on its way
-                        indexed_pages_count += 1
-                except GoogleHttpError as inspect_error:
-                    logger.error(f"Google API Error inspecting URL {url_to_inspect} for site {site_url}: {inspect_error}")
-                    # Optionally collect these errors. For now, continue.
-                except Exception as e:
-                    logger.error(f"Generic error inspecting URL {url_to_inspect} for site {site_url}: {e}")
-
-            api_message = f"Checked {len(urls_to_inspect)} URLs. Found {indexed_pages_count} indexed or neutral."
-            logger.info(f"Inspection complete for {site_url}. Indexed: {indexed_pages_count}/{len(urls_to_inspect)}")
-        elif total_pages_inspected == 0 and api_message == "Process initiated.": # No URLs from analytics, and sitemap check didn't change message
-             api_message = "Could not retrieve any URLs to inspect from recent search analytics. Ensure site has recent activity or check GSC."
-
-        # --- 5. Store Inspected Pages in Firestore ---
-        if urls_to_inspect_dict:
-            batch = DB.batch()
-            site_pages_collection_ref = DB.collection("pages")
-            current_timestamp = datetime.datetime.now(datetime.timezone.utc)
-            pages_batched_count = 0 # Counter for pages added to the batch
-
-            for page_url, status_verdict in urls_to_inspect_dict.items():
-                # All pages for which an inspection was attempted (i.e., in urls_to_inspect_dict) will be recorded.
-                # If status_verdict is None or empty, it indicates an issue with fetching the verdict for that specific URL,
-                # or that the inspection for this particular URL failed, but we still record the attempt.
-                if not status_verdict:
-                    logger.info(f"Storing page {page_url} for site {site_url} with an empty/null verdict: '{status_verdict}'.")
-                # else: # Optionally, log when a valid verdict is found too
-                #    logger.info(f"Storing page {page_url} for site {site_url} with verdict: '{status_verdict}'.")
-
-                # Create a unique ID for the document, e.g., combining userId, siteUrl, and pageUrl hash
-                # For simplicity, we can use pageUrl as part of ID if it's unique enough per site/user context
-                # or let Firestore auto-generate an ID if preferred.
-                # Using a composite key or a hashed URL might be better for querying.
-                # For now, let's use an auto-generated ID and store fields for querying.
-                page_doc_ref = site_pages_collection_ref.document() # Auto-generate ID
-                page_data = {
-                    "userId": user_id,
-                    "siteUrl": site_url, # The parent site's URL
-                    "siteId": site_id_for_pages, # FK to the 'sites' document
-                    "pageUrl": page_url, # The specific URL inspected
-                    "status": status_verdict,
-                    "lastCheckedAt": current_timestamp,
-                    # "domain": site_url.split("://")[-1].split("/")[0] # Optional: for easier querying by domain
-                }
-                batch.set(page_doc_ref, page_data)
-                pages_batched_count += 1
-            
-            if pages_batched_count > 0:
-                try:
-                    batch.commit()
-                    logger.info(f"Successfully committed {pages_batched_count} page inspection results to Firestore for site {site_url}, user {user_id}.")
-                except Exception as e:
-                    logger.error(f"Error committing batch of {pages_batched_count} pages for user {user_id}, site {site_url}: {e}")
-                    # Propagate an error indicating storage failure.
-                    raise https_fn.HttpsError(
-                        code=https_fn.FunctionsErrorCode.INTERNAL,
-                        message=f"Successfully checked pages with Google, but failed to store results: {e}. Please try again or contact support if the issue persists."
-                    )
-            else:
-                logger.info(f"No pages with valid verdicts to store in Firestore for site {site_url}, user {user_id}. Total URLs considered in urls_to_inspect_dict: {len(urls_to_inspect_dict)}.")
-        else:
-            logger.info(f"urls_to_inspect_dict was empty. No page inspection results to store for site {site_url}, user {user_id}.")
-
-
+    if not urls_to_inspect:
         return {
-            "indexedPages": indexed_pages_count,
-            "totalPages": total_pages_inspected, # Reflects URLs actually processed
-            "creditsUsed": credits_to_use,
-            "message": api_message,
-            "urlsInspected": urls_to_inspect,
-            "urlsInspectedDetails": urls_to_inspect_dict,  # Contains URL and its inspection verdict
+            "status": "no_urls_found",
+            "message": "No URLs found to inspect from Search Analytics or Sitemaps. Ensure the site has GSC activity or registered sitemaps.",
             "siteUrl": site_url,
         }
 
-    except GoogleHttpError as e:
-        logger.error(f"Google API Error during GSC interaction for site {site_url} (user {user_id}): {e.resp.status} - {e._get_reason()}")
-        error_content = e.content.decode('utf-8') if e.content else "{}"
-        logger.error(f"Google API Error content: {error_content}")
-        if credits_deducted_successfully:
-            user_ref.update({"credits": firestore.Increment(credits_to_use)})
-            logger.info(f"Rolled back {credits_to_use} credits for user {user_id} due to GSC API error.")
-        
-        # Try to parse Google's error for a better message
-        import json
-        try:
-            gsc_error_details = json.loads(error_content)
-            err_msg = gsc_error_details.get("error", {}).get("message", "Unknown GSC API error.")
-            err_code = gsc_error_details.get("error", {}).get("code", e.resp.status)
+    # --- Pre-check Credits & Prepare for Background Task ---
+    estimated_credits_to_use = len(urls_to_inspect) * CREDIT_PER_URL
+    user_ref = DB.collection("users").document(user_id)
+    
+    try:
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.NOT_FOUND, message="User record not found for credit check.")
+        current_credits = user_doc.to_dict().get('credits', 0)
+        if current_credits < estimated_credits_to_use:
             raise https_fn.HttpsError(
-                code=https_fn.FunctionsErrorCode.INTERNAL, # Or map GSC codes if possible
-                message=f"Google Search Console API Error: {err_msg} (Code: {err_code})"
+                code=https_fn.FunctionsErrorCode.RESOURCE_EXHAUSTED,
+                message=f"Insufficient credits. This action requires {estimated_credits_to_use} credits, but you have {current_credits}."
             )
-        except (json.JSONDecodeError, AttributeError):
-             raise https_fn.HttpsError(
-                code=https_fn.FunctionsErrorCode.INTERNAL,
-                message=f"Google Search Console API Error (Status {e.resp.status}): {e._get_reason()}"
-            )
-
+    except https_fn.HttpsError:
+        raise # Re-raise HttpsError
     except Exception as e:
-        logger.error(f"Unexpected error during GSC API interaction for site {site_url} (user {user_id}): {e}", exc_info=True)
-        if credits_deducted_successfully:
-            user_ref.update({"credits": firestore.Increment(credits_to_use)})
-            logger.info(f"Rolled back {credits_to_use} credits for user {user_id} due to unexpected GSC API error.")
+        logger.error(f"Error during credit pre-check for user {user_id}: {e}")
+        raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message="Failed to verify credits.")
+
+    # --- Create Indexing History Record ---
+    indexing_history_ref = DB.collection("indexingHistory").document()
+    indexing_history_id = indexing_history_ref.id
+    try:
+        history_data = {
+            "userId": user_id,
+            "siteId": site_id_for_pages, # site_id_for_pages resolved earlier
+            "siteUrl": site_url,
+            "status": "pending", # This is fine, matches TS type
+            "action": "check", # Added action field
+            "pageId": "", # Added pageId for site-wide check
+            "timestamp": firestore.SERVER_TIMESTAMP, # Use server timestamp
+            "urlsToInspectCount": len(urls_to_inspect),
+            "estimatedCredits": estimated_credits_to_use,
+            "message": f"Indexing task for {len(urls_to_inspect)} URLs initiated."
+        }
+        indexing_history_ref.set(history_data)
+        logger.info(f"Created indexingHistory record {indexing_history_id} for user {user_id}, site {site_url}.")
+    except Exception as e:
+        logger.error(f"Failed to create indexingHistory record for user {user_id}, site {site_url}: {e}", exc_info=True)
+        # Proceed with Pub/Sub publish, but log this failure. The task won't have a history entry if this fails.
+        # Depending on requirements, you might want to raise an error here.
+
+
+    # --- Publish to Pub/Sub ---
+    project_id = get_project_id()
+    if not project_id:
+         raise https_fn.HttpsError(code=https_fn.FunctionsErrorCode.INTERNAL, message="Project ID not configured for Pub/Sub.")
+
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path(project_id, PUBSUB_TOPIC_ID)
+    
+    message_payload = {
+        "userId": user_id,
+        "siteUrl": site_url,
+        "siteIdForPages": site_id_for_pages,
+        "urlsToInspect": urls_to_inspect,
+        "userAuthDetails": user_auth_details, # Contains tokens
+        "creditsToDeduct": estimated_credits_to_use,
+        "indexingHistoryId": indexing_history_id # Add indexingHistoryId
+    }
+    
+    try:
+        message_bytes = json.dumps(message_payload).encode("utf-8")
+        future = publisher.publish(topic_path, data=message_bytes)
+        future.result() # Wait for publish to complete
+        logger.info(f"Successfully published indexing task for user {user_id}, site {site_url} with {len(urls_to_inspect)} URLs.")
+    except Exception as e:
+        logger.error(f"Failed to publish Pub/Sub message for user {user_id}, site {site_url}: {e}", exc_info=True)
+        # Do not refund here as no credits were deducted yet.
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INTERNAL,
-            message=f"Failed to get site indexing status from Google Search Console: {e}"
+            message=f"Failed to initiate indexing task: {e}"
         )
+
+    return {
+        "status": "pending",
+        "message": f"Site indexing process for {len(urls_to_inspect)} URLs has been initiated. This will use approximately {estimated_credits_to_use} credits.",
+        "siteUrl": site_url,
+        "urlsQueued": len(urls_to_inspect),
+        "estimatedCredits": estimated_credits_to_use
+    }
+
+
+# --- Pub/Sub Triggered Function: execute_site_indexing ---
+@pubsub_fn.on_message_published(
+    topic=PUBSUB_TOPIC_ID,
+    timeout_sec=540, # Max timeout for Pub/Sub triggered functions
+    memory=options.MemoryOption.MB_512, # Adjust as needed for GSC client and processing
+    # region="your-region" # Specify if not default
+)
+def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublishedData]) -> None:
+    """
+    Background function to process site indexing tasks from Pub/Sub.
+    """
+    try:
+        message_data_bytes = event.data.message.data
+        message_data_str = base64.b64decode(message_data_bytes).decode('utf-8')
+        payload = json.loads(message_data_str)
+        
+        user_id = payload["userId"]
+        site_url = payload["siteUrl"]
+        site_id_for_pages = payload["siteIdForPages"]
+        urls_to_inspect = payload["urlsToInspect"]
+        user_auth_details = payload["userAuthDetails"] # Contains tokens
+        credits_to_deduct = payload["creditsToDeduct"]
+        indexing_history_id = payload.get("indexingHistoryId") # Get indexingHistoryId
+
+        logger.info(f"execute_site_indexing started for user {user_id}, site {site_url}. URLs: {len(urls_to_inspect)}, Credits: {credits_to_deduct}, HistoryID: {indexing_history_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to parse Pub/Sub message: {e}", exc_info=True)
+        # Cannot easily notify user or refund if basic payload parsing fails.
+        return # Stop processing if payload is malformed
+
+    user_ref = DB.collection("users").document(user_id)
+    credits_deducted_successfully = False
+
+    # --- Update Indexing History Helper ---
+    def update_indexing_history(history_id: str | None, status: str, message: str, additional_data: dict | None = None):
+        if not history_id:
+            logger.warning(f"No indexingHistoryId provided, cannot update history for user {user_id}, site {site_url}.")
+            return
+        try:
+            history_ref = DB.collection("indexingHistory").document(history_id)
+            update_payload = {
+                "creditsUsed": firestore.Increment(credits_to_deduct) if credits_to_deduct > 0 else 0,
+                "status": status,
+                "message": message,
+                "updatedAt": firestore.SERVER_TIMESTAMP
+            }
+            if additional_data:
+                update_payload.update(additional_data)
+            history_ref.update(update_payload)
+            logger.info(f"Updated indexingHistory {history_id} to status {status} for user {user_id}, site {site_url}.")
+        except Exception as e_hist:
+            logger.error(f"Failed to update indexingHistory {history_id} for user {user_id}, site {site_url}: {e_hist}", exc_info=True)
+
+    # --- 1. Credit Deduction ---
+    if credits_to_deduct > 0: # Only deduct if there's a cost
+        try:
+            transaction = DB.transaction()
+            _deduct_credits_in_transaction(transaction, user_ref, credits_to_deduct, user_id)
+            # Transaction is committed automatically if _deduct_credits_in_transaction doesn't raise.
+            credits_deducted_successfully = True
+            logger.info(f"Successfully deducted {credits_to_deduct} credits for user {user_id} for site {site_url}.")
+            # Update history after successful deduction (or if no deduction needed)
+            if indexing_history_id: # Check if ID exists
+                 update_indexing_history(indexing_history_id, "pending", f"Successfully deducted {credits_to_deduct} credits. Starting GSC processing.", {"actualCreditsUsed": credits_to_deduct if credits_to_deduct > 0 else 0})
+
+        except https_fn.HttpsError as e:
+            logger.error(f"Credit deduction HttpsError for user {user_id}, site {site_url}: {e.message}. Task will not proceed.")
+            update_indexing_history(indexing_history_id, "failed", f"Credit deduction failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP})
+            return # Stop processing
+        except Exception as e:
+            logger.error(f"Generic credit deduction failed for user {user_id}, site {site_url}: {e}", exc_info=True)
+            update_indexing_history(indexing_history_id, "failed", f"Credit deduction failed: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP})
+            return # Stop processing
+    else:
+        logger.info(f"No credits to deduct for user {user_id}, site {site_url} (credits_to_deduct={credits_to_deduct}).")
+        credits_deducted_successfully = True # Effectively, as no deduction was needed.
+        if indexing_history_id: # Check if ID exists
+            update_indexing_history(indexing_history_id, "pending", "No credits to deduct. Starting GSC processing.", {"actualCreditsUsed": 0})
+
+
+    # --- 2. Initialize Google Search Console API ---
+    search_console = None
+    try:
+        search_console = _get_authenticated_gsc_client(user_auth_details, user_id)
+    except https_fn.HttpsError as e:
+        logger.error(f"Failed to initialize Search Console client for user {user_id} (site {site_url}): {e.message}")
+        if credits_deducted_successfully and credits_to_deduct > 0:
+            user_ref.update({"credits": firestore.Increment(credits_to_deduct)})
+            logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} due to GSC client init failure for site {site_url}.")
+        update_indexing_history(indexing_history_id, "failed", f"GSC client initialization failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_to_deduct if credits_deducted_successfully and credits_to_deduct > 0 else 0})
+        return # Stop processing
+    except Exception as e:
+        logger.error(f"Unexpected error initializing GSC client for user {user_id} (site {site_url}): {e}", exc_info=True)
+        if credits_deducted_successfully and credits_to_deduct > 0:
+            user_ref.update({"credits": firestore.Increment(credits_to_deduct)})
+            logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} due to unexpected GSC client init failure for site {site_url}.")
+        update_indexing_history(indexing_history_id, "failed", f"Unexpected GSC client initialization error: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
+        return # Stop processing
+
+    # Define current_timestamp here, after successful GSC client init and before processing
+    current_timestamp = datetime.datetime.now(datetime.timezone.utc)
+
+    # --- 3. Inspect URLs & Store Results ---
+    total_pages_inspected_count = 0 # Renamed from total_pages_inspected to avoid confusion
+    indexed_pages_count = 0
+    urls_inspection_details = {} # Stores URL -> verdict
+
+    if not urls_to_inspect:
+        logger.info(f"No URLs to inspect were provided in the payload for user {user_id}, site {site_url}.")
+        # Potentially update a task status in Firestore to 'completed_no_urls'
+        update_indexing_history(indexing_history_id, "successful", "No URLs were provided in the payload to inspect.", {"completedAt": firestore.SERVER_TIMESTAMP, "urlsInspectedCount": 0, "indexedPagesCount": 0})
+        return
+
+    logger.info(f"Inspecting {len(urls_to_inspect)} URLs for site: {site_url}, user: {user_id}")
+    for url_to_inspect in urls_to_inspect:
+        try:
+            time.sleep(0.25) # Slightly increased delay, QPS is per project/user for GSC API.
+            inspection_result = search_console.urlInspection().index().inspect(
+                body={"inspectionUrl": url_to_inspect, "siteUrl": site_url}
+            ).execute()
+            verdict = inspection_result.get("inspectionResult", {}).get("indexStatusResult", {}).get("verdict", "UNKNOWN_VERDICT")
+            urls_inspection_details[url_to_inspect] = verdict
+            if verdict in ["PASS"]:
+                indexed_pages_count += 1
+            total_pages_inspected_count +=1 # Count URLs for which inspection was attempted
+        except GoogleHttpError as inspect_error:
+            logger.error(f"Google API Error inspecting URL {url_to_inspect} for site {site_url} (user {user_id}): {inspect_error}")
+            urls_inspection_details[url_to_inspect] = f"ERROR_GSC_API: {inspect_error.resp.status}"
+        except Exception as e:
+            logger.error(f"Generic error inspecting URL {url_to_inspect} for site {site_url} (user {user_id}): {e}", exc_info=True)
+            urls_inspection_details[url_to_inspect] = "ERROR_INSPECTION_GENERIC"
+    
+    logger.info(f"Inspection complete for {site_url} (user {user_id}). Attempted: {total_pages_inspected_count}, Indexed/Neutral: {indexed_pages_count}/{len(urls_to_inspect)}")
+
+    # --- 4. Store Inspected Pages in Firestore ---
+    if urls_inspection_details:
+        batch = DB.batch()
+        site_pages_collection_ref = DB.collection("pages")
+        # current_timestamp = datetime.datetime.now(datetime.timezone.utc) # MOVED
+        pages_batched_count = 0
+
+        for page_url, status_verdict in urls_inspection_details.items():
+            page_doc_ref = site_pages_collection_ref.document() # Auto-generate ID
+            page_data = {
+                "userId": user_id,
+                "siteUrl": site_url,
+                "siteId": site_id_for_pages,
+                "pageUrl": page_url,
+                "status": status_verdict, # This now includes error statuses for specific URLs
+                "lastCheckedAt": current_timestamp,
+            }
+            batch.set(page_doc_ref, page_data)
+            pages_batched_count += 1
+        
+        if pages_batched_count > 0:
+            try:
+                batch.commit()
+                logger.info(f"Successfully committed {pages_batched_count} page inspection results to Firestore for site {site_url}, user {user_id}.")
+                # Potentially update a task status in Firestore to 'completed_success'
+            except Exception as e:
+                logger.error(f"Error committing batch of {pages_batched_count} pages for user {user_id}, site {site_url}: {e}", exc_info=True)
+                # Credits are NOT rolled back here as GSC work was done. This is a data storage failure.
+                # Potentially update a task status in Firestore to 'completed_storage_failure'
+                # Update indexing history to reflect storage failure but GSC work done
+                update_indexing_history(
+                    indexing_history_id, 
+                    "failed", 
+                    f"Inspection completed ({indexed_pages_count}/{total_pages_inspected_count} indexed), but failed to store all page details: {str(e)}",
+                    {
+                        "completedAt": firestore.SERVER_TIMESTAMP,
+                        "urlsInspectedCount": total_pages_inspected_count,
+                        "indexedPagesCount": indexed_pages_count
+                    }
+                )
+        else:
+            logger.info(f"No page inspection results to store in Firestore for site {site_url}, user {user_id} (urls_inspection_details was populated but no pages batched).")
+    else:
+        logger.info(f"urls_inspection_details was empty. No page inspection results to store for site {site_url}, user {user_id}.")
+        # This case implies urls_to_inspect might have been non-empty, but all inspections failed before populating urls_inspection_details,
+        # or urls_to_inspect was empty from the start (handled earlier).
+        # If total_pages_inspected_count is 0 and urls_to_inspect was not, it means all attempts failed.
+        if total_pages_inspected_count == 0 and len(urls_to_inspect) > 0:
+             update_indexing_history(
+                indexing_history_id, 
+                "failed", 
+                f"All {len(urls_to_inspect)} URL inspections failed. No results to store.",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsInspectedCount": 0,
+                    "indexedPagesCount": 0
+                }
+            )
+        # If urls_to_inspect was empty, it's already handled. If some were inspected but none had details (unlikely), it's a partial success.
+
+    # --- 5. Update the parent Site Document ---
+    if site_id_for_pages: # site_id_for_pages comes from the Pub/Sub message payload
+        site_doc_ref = DB.collection("sites").document(site_id_for_pages)
+        try:
+            num_requested_urls = len(urls_to_inspect)
+            num_actually_inspected = total_pages_inspected_count # URLs for which GSC API call was made
+
+            final_status_for_site_doc = "successful"
+            scan_message = ""
+
+            history_status_update = "successful" # Default for history
+
+            if num_actually_inspected == 0 and num_requested_urls > 0:
+                final_status_for_site_doc = "error" 
+                scan_message = f"Scan failed: Could not inspect any of the {num_requested_urls} URLs."
+                history_status_update = "failed"
+            elif any("ERROR_" in str(status_val) for status_val in urls_inspection_details.values()):
+                final_status_for_site_doc = "completed_with_errors"
+                scan_message = f"Scan completed with errors: {indexed_pages_count}/{num_actually_inspected} indexed. Some URL inspections failed."
+                history_status_update = "failed"
+            elif num_actually_inspected < num_requested_urls: 
+                final_status_for_site_doc = "completed_partial_inspection"
+                scan_message = f"Scan partially completed: {indexed_pages_count}/{num_actually_inspected} indexed. Only {num_actually_inspected}/{num_requested_urls} URLs processed."
+                history_status_update = "failed"
+            else: 
+                final_status_for_site_doc = "completed"
+                if num_actually_inspected == 0 : 
+                     scan_message = "Scan completed: No URLs to inspect."
+                     history_status_update = "successful" # Matches completed_no_urls logic
+                else:
+                     scan_message = f"Scan completed: {indexed_pages_count}/{num_actually_inspected} pages indexed/neutral."
+                     history_status_update = "successful"
+            
+            site_update_data = {
+                "indexedPages": indexed_pages_count,
+                "totalPages": num_actually_inspected,
+                "lastScan": current_timestamp, # Use the timestamp defined earlier
+                "lastScanStatus": final_status_for_site_doc,
+                "lastScanMessage": scan_message
+            }
+            
+            site_doc_ref.update(site_update_data)
+            logger.info(f"Successfully updated site document '{site_id_for_pages}' for user '{user_id}' with final scan results: Status '{final_status_for_site_doc}'.")
+            
+            # Update indexingHistory with the final status from site document logic
+            update_indexing_history(
+                indexing_history_id,
+                history_status_update, # Use the mapped status
+                scan_message, # Detailed message from site update logic
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP, # Use the same timestamp as site doc if possible, or new one
+                    "urlsInspectedCount": num_actually_inspected,
+                    "indexedPagesCount": indexed_pages_count,
+                    # "totalPagesForSite": num_actually_inspected # This is total pages *inspected in this run*
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Error updating site document '{site_id_for_pages}' for user '{user_id}': {e}", exc_info=True)
+            # Update indexing history to reflect site update failure
+            update_indexing_history(
+                indexing_history_id,
+                "failed",
+                f"Inspections done ({indexed_pages_count}/{total_pages_inspected_count} indexed), but failed to update site summary: {str(e)}",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsInspectedCount": total_pages_inspected_count, # Assuming total_pages_inspected_count is accurate
+                    "indexedPagesCount": indexed_pages_count
+                }
+            )
+    else:
+        logger.warning(f"site_id_for_pages was missing or empty in the payload. Cannot update parent site document stats for user '{user_id}', siteUrl '{site_url}'.")
+        # If site_id_for_pages is missing, we can still update indexingHistory if ID is present
+        if indexing_history_id:
+            # Determine a status based on inspection results if site update is skipped
+            final_history_status_mapped = "failed" # Default to failed
+            final_history_message = f"Scan processed {total_pages_inspected_count} URLs ({indexed_pages_count} indexed/neutral). Site summary not updated as siteId was missing."
+            
+            if total_pages_inspected_count == 0 and len(urls_to_inspect) > 0:
+                final_history_status_mapped = "failed"
+                final_history_message = f"All {len(urls_to_inspect)} URL inspections failed. Site summary not updated (siteId missing)."
+            elif any("ERROR_" in str(status_val) for status_val in urls_inspection_details.values()):
+                final_history_status_mapped = "failed"
+                # Keep message as is, or specialize for "completed_with_errors"
+            elif total_pages_inspected_count > 0 :
+                final_history_status_mapped = "successful"
+            # If final_history_status was "unknown", it defaults to "failed" here.
+            
+            update_indexing_history(
+                indexing_history_id,
+                final_history_status_mapped,
+                final_history_message,
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsInspectedCount": total_pages_inspected_count,
+                    "indexedPagesCount": indexed_pages_count
+                }
+            )
+
+
+    # Final log for the background task
+    logger.info(f"execute_site_indexing finished for user {user_id}, site {site_url}. Processed {total_pages_inspected_count} of {len(urls_to_inspect)} URLs. Indexed/Neutral: {indexed_pages_count}.")
+    # Note: The original return structure with detailed counts is no longer directly returned to the HTTP caller.
+    # This information is now logged by the background function and stored in Firestore.
+    # If you need to communicate completion status back to the user, consider writing to a 'tasks' collection in Firestore
+    # that the frontend can monitor, or use another notification mechanism.

@@ -16,29 +16,34 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
   };
 
   const getActionIcon = (action: string, status: string) => {
-    if (action === 'check') {
-      return status === 'successful'
-        ? <CheckCircle className="w-5 h-5 text-green-600" />
-        : <AlertTriangle className="w-5 h-5 text-amber-600" />;
-    } else { // action === 'request'
-      return status === 'successful' || status === 'pending'
-        ? <RefreshCw className="w-5 h-5 text-blue-600" />
-        : <AlertTriangle className="w-5 h-5 text-red-600" />;
-    }
-  };
+      if (action === 'check') {
+        if (status === 'successful') {
+          return <CheckCircle className="w-5 h-5 text-green-600" />;
+        } else if (status === 'pending' || status === 'processing') {
+          return <RefreshCw className="w-5 h-5 text-blue-600" />;
+        } else {
+          return <AlertTriangle className="w-5 h-5 text-amber-600" />;
+        }
+      } else {
+        return status === 'successful' || status === 'pending' || status === 'processing'
+          ? <RefreshCw className="w-5 h-5 text-blue-600" />
+          : <AlertTriangle className="w-5 h-5 text-red-600" />;
+      }
+    };
 
   const getActionText = (action: string): string => {
     return action === 'check' ? 'Check Indexing' : 'Request Indexing';
   };
 
-  const getResultClass = (result: string): string => {
-    switch (result) {
+  const getResultClass = (statusValue: string): string => { // Renamed parameter for clarity
+    switch (statusValue) {
       case 'indexed':
       case 'successful':
         return 'bg-green-100 text-green-800';
       case 'not_indexed':
         return 'bg-amber-100 text-amber-800';
       case 'pending':
+      case 'processing': // Added processing here
         return 'bg-blue-100 text-blue-800';
       case 'failed':
         return 'bg-red-100 text-red-800';
@@ -47,20 +52,22 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
     }
   };
 
-  const getResultText = (result: string): string => {
-    switch (result) {
+  const getResultText = (statusValue: string): string => { // Renamed parameter for clarity
+    switch (statusValue) {
       case 'indexed':
         return 'Indexed';
       case 'not_indexed':
         return 'Not Indexed';
       case 'pending':
         return 'Pending';
+      case 'processing': // Added processing here
+        return 'Processing';
       case 'successful':
         return 'Successful';
       case 'failed':
         return 'Failed';
       default:
-        return result;
+        return statusValue; // Return the status value itself if not matched
     }
   };
 
@@ -115,12 +122,12 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
                 </div>
               </td>
               <td className="px-6 py-4">
-                <span className={`px-2 py-1 text-xs font-medium rounded-full ${getResultClass(item.result)}`}>
-                  {getResultText(item.result)}
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${getResultClass(item.status)}`}>
+                  {getResultText(item.status)}
                 </span>
               </td>
               <td className="px-6 py-4 text-sm text-slate-700 text-right">
-                {item.creditsUsed}
+                {item.status == 'successful' ? item.creditsUsed + " credits" : item.estimatedCredits + " credits estimated"}
               </td>
             </tr>
           ))}

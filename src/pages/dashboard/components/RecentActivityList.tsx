@@ -16,11 +16,15 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
 
   const getActivityIcon = (activity: IndexingHistory) => {
     if (activity.action === 'check') {
-      return activity.status === 'successful' 
-        ? <CheckCircle className="w-5 h-5 text-green-600" />
-        : <AlertTriangle className="w-5 h-5 text-amber-600" />;
+      if (activity.status === 'successful') {
+        return <CheckCircle className="w-5 h-5 text-green-600" />;
+      } else if (activity.status === 'pending' || activity.status === 'processing') {
+        return <RefreshCw className="w-5 h-5 text-blue-600" />;
+      } else {
+        return <AlertTriangle className="w-5 h-5 text-amber-600" />;
+      }
     } else {
-      return activity.status === 'successful' || activity.status === 'pending'
+      return activity.status === 'successful' || activity.status === 'pending' || activity.status === 'processing'
         ? <RefreshCw className="w-5 h-5 text-blue-600" />
         : <AlertTriangle className="w-5 h-5 text-red-600" />;
     }
@@ -30,14 +34,22 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
     const siteName = getSiteNameById(activity.siteId);
     
     if (activity.action === 'check') {
-      return activity.status === 'successful'
-        ? `Successfully checked pages on ${siteName}`
-        : `Failed to check pages on ${siteName}`;
+      if (activity.status === 'successful') {
+        return `Successfully checked pages on ${siteName}`;
+      } else if (activity.status === 'pending') {
+        return `Checking pages on ${siteName}`;
+      } else if (activity.status === 'processing') {
+        return `Processing page check on ${siteName}`;
+      } else {
+        return `Failed to check pages on ${siteName}`;
+      }
     } else {
       if (activity.status === 'successful') {
         return `Successfully requested indexing for page on ${siteName}`;
       } else if (activity.status === 'pending') {
         return `Submitted indexing request for page on ${siteName}`;
+      } else if (activity.status === 'processing') {
+        return `Processing indexing request for page on ${siteName}`;
       } else {
         return `Failed to request indexing for page on ${siteName}`;
       }
@@ -80,7 +92,7 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
           </div>
           <div className="text-right">
             <div className="text-xs font-medium text-slate-700 bg-slate-100 py-1 px-2 rounded-full">
-              {activity.creditsUsed} credits
+              {activity.status == 'successful' ? activity.creditsUsed + " credits" : activity.estimatedCredits + " credits estimated"}
             </div>
           </div>
         </div>

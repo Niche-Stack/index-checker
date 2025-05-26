@@ -49,19 +49,31 @@ const HistoryPage: React.FC = () => {
           const historyQuery = query(
             collection(db, 'indexingHistory'),
             where('siteId', 'in', siteIds),
-            orderBy('timestamp', 'desc')
+            orderBy('timestamp', 'desc') // Changed 'timestamp' to 'timestamp'
           );
           
           const historySnapshot = await getDocs(historyQuery);
-          const historyData = historySnapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          })) as IndexingHistory[];
+          const historyData = historySnapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+              id: doc.id,
+              pageId: data.pageId || '',
+              siteId: data.siteId,
+              timestamp: data.timestamp, // Map timestamp to timestamp
+              action: data.action,
+              result: data.message || 'N/A', // Map message to result
+              status: data.status,
+              creditsUsed: data.actualCreditsUsed ?? data.estimatedCredits ?? 0, // Map credits
+            };
+          }).filter(item => item.timestamp) as IndexingHistory[]; // Ensure timestamp is valid for sorting/display
           
           setHistory(historyData);
+        } else {
+          setHistory([]); // Clear history if no sites
         }
       } catch (err) {
         console.error('Error fetching history data:', err);
+        setHistory([]); // Clear history on error to avoid crashes
       } finally {
         setLoading(false);
       }
@@ -93,8 +105,9 @@ const HistoryPage: React.FC = () => {
   });
   
   const sortedHistory = [...filteredHistory].sort((a, b) => {
-    const aTime = a.timestamp.toDate().getTime();
-    const bTime = b.timestamp.toDate().getTime();
+    // Ensure timestamp objects are valid and have toDate method
+    const aTime = a.timestamp && typeof a.timestamp.toDate === 'function' ? a.timestamp.toDate().getTime() : 0;
+    const bTime = b.timestamp && typeof b.timestamp.toDate === 'function' ? b.timestamp.toDate().getTime() : 0;
     
     return sortOrder === 'asc' ? aTime - bTime : bTime - aTime;
   });
@@ -108,7 +121,8 @@ const HistoryPage: React.FC = () => {
     const headers = ['Date', 'Site', 'Action', 'Result', 'Credits Used'];
     
     const csvData = sortedHistory.map(item => [
-      item.timestamp.toDate().toISOString(),
+      // Ensure timestamp objects are valid and have toDate method for CSV export
+      item.timestamp && typeof item.timestamp.toDate === 'function' ? item.timestamp.toDate().toISOString() : 'N/A',
       getSiteNameById(item.siteId),
       item.action === 'check' ? 'Check Indexing' : 'Request Indexing',
       item.result,

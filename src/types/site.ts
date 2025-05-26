@@ -20,7 +20,7 @@ export interface Page {
   indexed: boolean;
   lastIndexed: any | null; // Firestore timestamp
   indexRequested: boolean;
-  indexRequestedAt: any | null; // Firestore timestamp
+  indextimestamp: any | null; // Firestore timestamp
   siteUrl: string; // Added: Parent site URL, used in table
   status: string; // Added: Indexing status from GSC, used in table
 }
@@ -32,6 +32,7 @@ export interface IndexingHistory {
   timestamp: any; // Firestore timestamp
   action: 'check' | 'index_request';
   result: string;
-  status: 'indexed' | 'not_indexed' | 'pending' | 'successful' | 'failed';
+  status: 'indexed' | 'not_indexed' | 'pending' | 'processing' | 'successful' | 'failed';
   creditsUsed: number;
+  estimatedCredits: number;
 }

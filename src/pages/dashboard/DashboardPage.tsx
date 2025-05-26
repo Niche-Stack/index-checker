@@ -36,9 +36,16 @@ const DashboardPage: React.FC = () => {
   const [actionsThisMonth, setActionsThisMonth] = useState(0);
 
   const fetchDashboardData = async () => {
-    if (!currentUser) return;
+    console.log('fetchDashboardData called. currentUser:', currentUser); // Log currentUser
+    if (!currentUser) {
+      console.log('currentUser is null, returning early from fetchDashboardData.');
+      setLoading(false); // Ensure loading is set to false if returning early
+      return;
+    }
 
+    setLoading(true); // Set loading to true at the start of fetching
     try {
+      console.log(`Fetching sites for user: ${currentUser.uid}`);
       // Fetch user's sites
       const sitesQuery = query(
         collection(db, 'sites'),
@@ -52,6 +59,7 @@ const DashboardPage: React.FC = () => {
         ...doc.data()
       })) as Site[];
       
+      console.log('Fetched sitesData:', sitesData); // Log sitesData
       setSites(sitesData);
       
       // Calculate metrics
@@ -67,9 +75,9 @@ const DashboardPage: React.FC = () => {
       setTotalIndexed(indexed);
       setTotalNonIndexed(pages - indexed);
       
-      // Fetch recent history and count actions this month
       if (sitesData.length > 0) {
         const siteIds = sitesData.map(site => site.id);
+        console.log('Derived siteIds:', siteIds); // Log siteIds
         
         // Fetch recent history for the activity list (limited)
         const historyQuery = query(
@@ -79,11 +87,14 @@ const DashboardPage: React.FC = () => {
           limit(10)
         );
         
+        console.log('Executing historyQuery for siteIds:', siteIds);
         const historySnapshot = await getDocs(historyQuery);
         const historyData = historySnapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
         })) as IndexingHistory[];
+        
+        console.log('Fetched historyData:', historyData); // Log historyData
         setRecentHistory(historyData);
         
         // Accurately count actions this month
@@ -100,8 +111,9 @@ const DashboardPage: React.FC = () => {
         
         const actionsSnapshot = await getDocs(actionsQuery);
         setActionsThisMonth(actionsSnapshot.size);
+        console.log('Actions this month:', actionsSnapshot.size);
       } else {
-        // No sites, so no recent history or actions this month
+        console.log('No sites found for user, setting recentHistory and actionsThisMonth to empty/zero.');
         setRecentHistory([]);
         setActionsThisMonth(0);
       }
@@ -113,8 +125,21 @@ const DashboardPage: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchDashboardData();
-  }, [currentUser]);
+    // Ensure currentUser is available before fetching.
+    if (currentUser) {
+        fetchDashboardData();
+    } else {
+        console.log('useEffect: currentUser is null, not calling fetchDashboardData.');
+        setLoading(false); // Stop loading if no user
+        setSites([]); // Clear sites
+        setRecentHistory([]); // Clear history
+        // Reset other metrics too
+        setTotalPages(0);
+        setTotalIndexed(0);
+        setTotalNonIndexed(0);
+        setActionsThisMonth(0);
+    }
+  }, [currentUser]); // Depend only on currentUser
 
   const handleCheckAllPages = async () => {
     if (!currentUser || sites.length === 0 || isProcessingAction) return;
@@ -142,31 +167,27 @@ const DashboardPage: React.FC = () => {
         try {
           const siteIdentifier = site.gscProperty ? site.gscProperty : site.url;
           const response: any = await getSiteIndexingStatus({ siteUrl: siteIdentifier });
-          const { indexedPages, totalPages: apiTotalPages, creditsUsed, message } = response.data;
+          // const { indexedPages, totalPages: apiTotalPages, creditsUsed, message } = response.data; // Old destructuring
+          const {
+            status: cloudFnStatus,
+            message: cloudFnMessage,
+            urlsQueued,
+            estimatedCredits
+          } = response.data as { status: string; message: string; urlsQueued?: number; estimatedCredits?: number };
 
-          console.log(`API response for ${site.name}:`, response.data);
+
+          console.log(`Cloud function response for ${site.name}:`, response.data);
 
           const siteDocRef = doc(db, 'sites', site.id);
           await updateDoc(siteDocRef, {
-            indexedPages: indexedPages,
-            totalPages: apiTotalPages, // Update total pages from API if it can change
+            // indexedPages: indexedPages, // No longer available directly
+            // totalPages: apiTotalPages, // No longer available directly
             lastScan: serverTimestamp(),
-            lastScanStatus: 'success',
-            lastScanMessage: message || 'Successfully checked.',
+            lastScanStatus: cloudFnStatus === 'pending' ? 'processing' : 'queued_with_unknown_status', // Reflects that task is initiated
+            lastScanMessage: cloudFnMessage || 'Indexing task initiated.',
           });
-          console.log(`Updated site ${site.name} in Firestore.`);
+          console.log(`Updated site ${site.name} in Firestore to reflect pending check.`);
 
-          const historyCollectionRef = collection(db, 'indexingHistory');
-          await addDoc(historyCollectionRef, {
-            siteId: site.id,
-            userId: currentUser.uid,
-            timestamp: serverTimestamp(),
-            action: 'check',
-            result: `Checked: ${indexedPages}/${apiTotalPages} indexed. ${message || ''}`,
-            creditsUsed: creditsUsed || 0, // Use actual value from API
-            status: 'successful',
-          });
-          console.log(`Added history entry for site ${site.name} check action.`);
           sitesProcessedCount++;
 
         } catch (siteError: any) {
@@ -180,17 +201,6 @@ const DashboardPage: React.FC = () => {
             lastScan: serverTimestamp(),
             lastScanStatus: 'error',
             lastScanMessage: `Failed: ${errorMessage}`,
-          });
-
-          const historyCollectionRef = collection(db, 'indexingHistory');
-          await addDoc(historyCollectionRef, {
-            siteId: site.id,
-            userId: currentUser.uid,
-            timestamp: serverTimestamp(),
-            action: 'check',
-            result: `Failed to check site. Error: ${errorMessage}`,
-            creditsUsed: 0, // No credits used if the function call itself failed before credit deduction logic
-            status: 'failed',
           });
 
           if (siteError.code === 'unauthenticated' && siteError.message.includes("token has expired")) {
@@ -257,20 +267,7 @@ const DashboardPage: React.FC = () => {
 
         // Simulating API response for now
         await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate network delay
-        const simulatedCreditsUsedForReindex = missingPages * 1; // Example: 1 credit per page
-
-        const historyCollectionRef = collection(db, 'indexingHistory');
-        await addDoc(historyCollectionRef, {
-          siteId: site.id,
-          userId: currentUser.uid,
-          timestamp: serverTimestamp(),
-          action: 'site_reindex_missing', // More specific action
-          result: 'pending', // Or 'successful_submission', 'failed_submission' based on API response
-          details: `Requested reindex for ${missingPages} pages.`, // Optional: add submissionId or other details
-          // creditsUsed: creditsUsed, // Use actual value from API
-          creditsUsed: simulatedCreditsUsedForReindex, // Using simulated value
-        });
-        console.log(`Added history entry for site ${site.name} reindex action.`);
+        // const simulatedCreditsUsedForReindex = missingPages * 1; // Example: 1 credit per page
 
         const siteDocRef = doc(db, 'sites', site.id);
         await updateDoc(siteDocRef, {

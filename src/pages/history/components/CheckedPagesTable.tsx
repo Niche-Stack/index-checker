@@ -50,7 +50,7 @@ export const CheckedPagesTable: React.FC<CheckedPagesTableProps> = ({ siteUrlFil
         const data = doc.data();
         const lastCheckedTimestamp = data.lastCheckedAt as Timestamp | undefined;
         // const lastIndexedTimestamp = data.lastIndexed as Timestamp | undefined; // Example if this field was present
-        // const indexRequestedAtTimestamp = data.indexRequestedAt as Timestamp | undefined; // Example if this field was present
+        // const indextimestampTimestamp = data.indextimestamp as Timestamp | undefined; // Example if this field was present
 
         return {
           id: doc.id,
@@ -66,7 +66,7 @@ export const CheckedPagesTable: React.FC<CheckedPagesTableProps> = ({ siteUrlFil
           indexed: data.indexed || false,
           lastIndexed: null, // data.lastIndexed is not in Firestore from main.py
           indexRequested: data.indexRequested || false,
-          indexRequestedAt: null, // data.indexRequestedAt is not in Firestore from main.py
+          indextimestamp: null, // data.indextimestamp is not in Firestore from main.py
         } as Page;
       });
       setCheckedPages(pagesData);
