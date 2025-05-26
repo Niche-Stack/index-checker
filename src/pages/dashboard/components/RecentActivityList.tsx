@@ -31,8 +31,8 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
     
     if (activity.action === 'check') {
       return activity.status === 'successful'
-        ? `Page on ${siteName} is indexed`
-        : `Page on ${siteName} is not indexed`;
+        ? `Successfully checked pages on ${siteName}`
+        : `Failed to check pages on ${siteName}`;
     } else {
       if (activity.status === 'successful') {
         return `Successfully requested indexing for page on ${siteName}`;
