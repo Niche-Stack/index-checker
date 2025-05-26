@@ -63,89 +63,85 @@ const Pricing: React.FC = () => {
   ];
 
   return (
-    <section 
-      id="pricing"
-      ref={pricingRef}
-      className="py-16 md:py-24 bg-gray-50 duration-1000"
-    >
-      <div className="container mx-auto px-4 md:px-6">
-        <div className="max-w-3xl mx-auto text-center mb-16">
-          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-            Simple, Transparent Pricing
-          </h2>
-          <p className="text-xl text-gray-600 leading-relaxed">
-            No hidden fees or complex tiers. Choose the plan that works for your business.
+    <section className="py-20 lg:py-32">
+      <div className="container mx-auto px-4">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl font-bold text-slate-900 mb-4">Simple, Transparent Pricing</h2>
+          <p className="text-lg text-slate-600 max-w-2xl mx-auto">
+            Only pay for what you use with our credit-based system. No monthly fees or hidden costs.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-4xl mx-auto">
-          {plans.map((plan, index) => (
-            <div 
-              key={index}
-              className={`bg-white rounded-xl shadow-lg overflow-hidden transition-transform hover:-translate-y-1 duration-300 ${
-                plan.recommended ? 'ring-2 ring-primary-500 relative' : ''
-              }`}
-            >
-              {plan.recommended && (
-                <div className="absolute top-0 right-0">
-                  <div className="bg-primary-500 text-white text-xs font-bold px-3 py-1 transform rotate-45 translate-x-6 -translate-y-1">
-                    BEST VALUE
-                  </div>
+        <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden">
+          <div className="p-8 border-b border-slate-100">
+            <h3 className="text-2xl font-bold text-slate-900 mb-2">Credit-Based System</h3>
+            <p className="text-slate-600 mb-6">Purchase credits and use them only when you need to check or index pages.</p>
+            
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="bg-slate-50 p-5 rounded-lg">
+                <div className="flex justify-between items-center mb-4">
+                  <h4 className="font-medium text-slate-800">Index checking</h4>
+                  <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">1 credit</span>
                 </div>
-              )}
+                <p className="text-slate-600 text-sm">Per page checked for indexing status</p>
+              </div>
               
-              <div className="p-8">
-                <h3 className="text-2xl font-bold text-gray-900 mb-4">{plan.name}</h3>
-                <p className="text-gray-600 mb-6">{plan.description}</p>
-                
-                <div className="mb-6">
-                  <div className="flex items-end">
-                    <span className="text-4xl font-bold text-gray-900">
-                      ${plan.price}
-                    </span>
-                    <span className="text-gray-500 ml-2 pb-1">
-                      /{plan.name.toLowerCase() === 'monthly' ? 'month' : 'year'}
-                    </span>
-                  </div>
-                  {plan.recommended && (
-                    <p className="text-green-600 text-sm font-medium mt-1">Includes 2 months free</p>
-                  )}
+              <div className="bg-slate-50 p-5 rounded-lg">
+                <div className="flex justify-between items-center mb-4">
+                  <h4 className="font-medium text-slate-800">Reindexing request</h4>
+                  <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium">5 credits</span>
                 </div>
-                
-                <ul className="space-y-3 mb-8">
-                  {plan.features.map((feature, idx) => (
-                    <li key={idx} className="flex">
-                      <Check size={20} className="text-green-500 mr-2 flex-shrink-0" />
-                      <span className="text-gray-600">{feature}</span>
-                    </li>
-                  ))}
-                </ul>
-                
-                <Button 
-                  variant="primary" 
-                  size="lg" 
-                  className="w-full"
-                  data-plan={plan.name.toLowerCase()}
-                >
-                  {plan.buttonText}
-                </Button>
+                <p className="text-slate-600 text-sm">Per page submitted for indexing</p>
               </div>
             </div>
-          ))}
-        </div>
-
-        <div className="mt-16 bg-white rounded-xl shadow-md p-8 max-w-4xl mx-auto">
-          <h3 className="text-xl font-bold text-gray-900 mb-4">Enterprise Solutions</h3>
-          <p className="text-gray-600 mb-6">
-            Need a custom solution for your large website or multiple domains? Our enterprise plan offers dedicated support, custom features, and volume discounts.
-          </p>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between">
-            <div className="mb-4 sm:mb-0">
-              <p className="text-gray-700 font-medium">Contact our sales team for a custom quote</p>
+          </div>
+          
+          <div className="p-8">
+            <h4 className="font-semibold text-slate-900 mb-4">Credit Packages</h4>
+            
+            <div className="space-y-4">
+              <div className="flex justify-between items-center p-4 border border-slate-200 rounded-lg">
+                <div>
+                  <h5 className="font-medium text-slate-800">Starter</h5>
+                  <p className="text-slate-500 text-sm">1,000 credits</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-medium text-slate-900">$10.00</p>
+                  <p className="text-xs text-slate-500">$0.01 per credit</p>
+                </div>
+              </div>
+              
+              <div className="flex justify-between items-center p-4 border border-slate-200 rounded-lg">
+                <div>
+                  <h5 className="font-medium text-slate-800">Pro</h5>
+                  <p className="text-slate-500 text-sm">5,000 credits</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-medium text-slate-900">$37.50</p>
+                  <p className="text-xs text-slate-500">$0.0075 per credit</p>
+                </div>
+              </div>
+              
+              <div className="flex justify-between items-center p-4 border border-slate-200 rounded-lg">
+                <div>
+                  <h5 className="font-medium text-slate-800">Enterprise</h5>
+                  <p className="text-slate-500 text-sm">20,000 credits</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-medium text-slate-900">$100.00</p>
+                  <p className="text-xs text-slate-500">$0.005 per credit</p>
+                </div>
+              </div>
             </div>
-            <Button variant="outline" size="md">
-              Contact Sales
-            </Button>
+            
+            <div className="mt-6 bg-blue-50 p-4 rounded-lg flex items-start">
+              <div className="shrink-0 mt-1">
+                <Check className="w-5 h-5 text-blue-800" />
+              </div>
+              <p className="ml-3 text-sm text-blue-800">
+                <strong>Free 100 credits</strong> for all new accounts so you can try the service risk-free.
+              </p>
+            </div>
           </div>
         </div>
       </div>

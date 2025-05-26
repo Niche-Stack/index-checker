@@ -45,12 +45,13 @@ const Header: React.FC = () => {
           </nav>
 
           <div className="hidden md:flex items-center space-x-4">
-            <Button variant="outline" size="sm">
-              Log in
-            </Button>
-            <Button variant="primary" size="sm">
-              Get Started
-            </Button>
+            <a 
+              href="/login" 
+            >
+              <Button variant="primary" size="sm">
+                Get Started
+              </Button>
+            </a>
           </div>
 
           {/* Mobile menu button */}
