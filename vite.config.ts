@@ -8,7 +8,7 @@ export default defineConfig({
     exclude: ['lucide-react'],
   },
   server: {
-    allowedHosts: ['fea86b333f27.ngrok.app']
+    allowedHosts: ['fea86b333f27.ngrok.app', 'indexchecker.ai']
   },
   base: '/'
 });
