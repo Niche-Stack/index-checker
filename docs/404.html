@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Redirecting...</title>
+  <script type="text/javascript">
+    // Single Page Apps for GitHub Pages
+    // https://github.com/rafgraph/spa-github-pages
+    // This script takes the current url and converts the path and query
+    // string into just a query string, and then redirects the browser
+    // to the new url with only a query string and hash fragment,
+    // e.g. https://www.foo.tld/one/two?a=b&c=d#qwe, becomes
+    // https://www.foo.tld/?/one/two&a=b~and~c=d#qwe
+    // Note: this 404.html file must be at least 512 bytes for it to work
+    // with Internet Explorer (it is currently > 512 bytes)
+
+    // If you're using a Project Pages site and not a User Pages site
+    // (e.g. https://user.github.io/repo-name) then remove the '/' prefix from sessionstorage.pathname
+    // and the location.pathname parts in this script.
+    // Also, if you are using a custom domain, you do not need to remove the '/' prefix.
+    // If you are using a Project Pages site (repo-name) with a custom domain,
+    // you will need to update the path segment count to 1.
+    var segmentCount = 1; // <--- Change this if you are using a custom domain and a Project Pages site.
+                         //      Otherwise, it should be 0 for User Pages sites or 1 for Project Pages site.
+                         //      If you are unsure, try 0.
+
+    var l = window.location;
+    sessionStorage.redirect = l.href;
+    l.replace(
+      l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+      l.pathname.split('/').slice(0, 1 + segmentCount).join('/') + '/?/' +
+      l.pathname.slice(1).split('/').slice(segmentCount).join('/').replace(/&/g, '~and~') +
+      (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+      l.hash
+    );
+
+  </script>
+</head>
+<body>
+  If you are not redirected automatically, follow <a id="redirect-link" href="#">this link</a>.
+  <script type="text/javascript">
+    document.getElementById('redirect-link').href = sessionStorage.redirect;
+  </script>
+</body>
+</html>
