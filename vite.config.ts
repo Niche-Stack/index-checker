@@ -9,5 +9,6 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['fea86b333f27.ngrok.app']
-  }
+  },
+  base: '/'
 });
