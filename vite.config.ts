@@ -9,6 +9,5 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['a52a7bf3b6b2.ngrok.app', 'indexchecker.ai']
-  },
-  base: '/'
+  }
 });
