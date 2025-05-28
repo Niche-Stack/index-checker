@@ -8,7 +8,7 @@ import { CreditProvider } from './contexts/CreditContext';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter basename='/index-checker/'>
+    <BrowserRouter basename='/'>
       <AuthProvider>
         <CreditProvider>
           <App />

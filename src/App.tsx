@@ -5,6 +5,7 @@ import LoadingScreen from './components/ui/LoadingScreen';
 import MainLayout from './layouts/MainLayout';
 import AuthLayout from './layouts/AuthLayout';
 import LandingPage from './pages/landing/LandingPage';
+const NotFoundPage = lazy(() => import('./pages/NotFoundPage')); // Import NotFoundPage
 
 // Lazy-loaded pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
@@ -116,8 +117,8 @@ function App() {
           </PrivateRoute>
         } />
         
-        {/* Fallback */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        {/* Fallback / 404 Not Found Route */}
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Suspense>
   );
