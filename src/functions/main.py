@@ -16,6 +16,7 @@ from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError as GoogleHttpError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.auth.exceptions import RefreshError as GoogleRefreshError
+import razorpay # Added for Razorpay integration
 
 # Initialize Firebase Admin SDK
 initialize_app()
@@ -30,6 +31,16 @@ CREDIT_PER_URL = 1  # Cost per URL inspection
 PUBSUB_TOPIC_ID = "site-indexing-tasks" # REPLACE with your Pub/Sub topic name
 REINDEX_PUBSUB_TOPIC_ID = "site-reindexing-tasks" # New Pub/Sub topic for re-indexing
 CREDIT_PER_REINDEX_URL = 5 # Cost per URL re-index request
+
+# Razorpay Configuration - Ideally use environment variables for keys
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "rzp_test_Bf4FkxNP2NXdZC") # Replace with your actual key ID or env var name
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "TBF0856B5o1xQV5ONGk83Cg6") # Replace with your actual key secret or env var name
+
+if RAZORPAY_KEY_ID == "YOUR_RAZORPAY_KEY_ID" or RAZORPAY_KEY_SECRET == "YOUR_RAZORPAY_KEY_SECRET":
+    logger.warning("Razorpay Key ID or Key Secret is not configured. Payment functions will not work.")
+
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
 
 # Helper to get project ID
 def get_project_id():
@@ -690,6 +701,204 @@ def request_site_reindexing(req: https_fn.CallableRequest) -> dict:
     }
 
 
+# --- Callable Function: createRazorpayOrder ---
+@https_fn.on_call(
+    cors=options.CorsOptions(
+        cors_origins=[
+            "http://localhost:5173",
+            "https://indexchecker-534db.web.app",
+            "https://indexchecker-534db.firebaseapp.com",
+            "https://fea86b333f27.ngrok.app" # Add your ngrok or other dev URLs
+        ],
+        cors_methods=["POST", "OPTIONS"]
+    )
+)
+def create_razorpay_order(req: https_fn.CallableRequest) -> dict:
+    """
+    Creates a Razorpay order for purchasing credits.
+    Expects: { amount: float, currency: str (e.g., "USD"), packageId: str, packageName: str }
+    """
+    if not req.auth:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
+            message="The function must be called while authenticated."
+        )
+    user_id = req.auth.uid
+
+    amount = req.data.get("amount") # Amount in the smallest currency unit (e.g., cents for USD)
+    currency = req.data.get("currency")
+    package_id = req.data.get("packageId") # For receipt and tracking
+    package_name = req.data.get("packageName") # For receipt
+
+    if not isinstance(amount, (int, float)) or amount <= 0:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Invalid 'amount' provided."
+        )
+    if currency != "USD": # Example: Enforce USD, or make configurable
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Invalid 'currency' provided. Only USD is supported currently."
+        )
+    if not package_id or not package_name:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Missing 'packageId' or 'packageName'."
+        )
+
+    # Convert amount to paise (or cents) as Razorpay expects the smallest currency unit
+    # For USD, amount should be in cents.
+    amount_in_smallest_unit = int(amount * 100)
+
+    order_data = {
+        "amount": amount_in_smallest_unit,
+        "currency": currency,
+        "notes": {
+            "userId": user_id,
+            "packageId": package_id,
+            "packageName": package_name,
+            "originalAmount": amount, # Store original amount for clarity
+        }
+    }
+
+    try:
+        logger.info(f"Creating Razorpay order for user {user_id} with data: {order_data}")
+        order = razorpay_client.order.create(data=order_data)
+        logger.info(f"Razorpay order created successfully for user {user_id}: {order['id']}")
+        return {
+            "success": True,
+            "orderId": order["id"],
+            "amount": order["amount"], # Amount in smallest unit
+            "currency": order["currency"],
+            "razorpayKeyId": RAZORPAY_KEY_ID # Send key ID to client for Razorpay SDK
+        }
+    except Exception as e:
+        logger.error(f"Error creating Razorpay order for user {user_id}: {e}", exc_info=True)
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL,
+            message=f"Failed to create Razorpay order: {str(e)}"
+        )
+
+# --- Callable Function: verifyRazorpayPayment ---
+@https_fn.on_call(
+    cors=options.CorsOptions(
+        cors_origins=[
+            "http://localhost:5173",
+            "https://indexchecker-534db.web.app",
+            "https://indexchecker-534db.firebaseapp.com",
+            "https://fea86b333f27.ngrok.app" # Add your ngrok or other dev URLs
+        ],
+        cors_methods=["POST", "OPTIONS"]
+    )
+)
+def verify_razorpay_payment(req: https_fn.CallableRequest) -> dict:
+    """
+    Verifies a Razorpay payment and adds credits to the user's account.
+    Expects: {
+        razorpay_payment_id: str,
+        razorpay_order_id: str,
+        razorpay_signature: str,
+        packageId: str, // To fetch package details for credits
+        creditsToAdd: int, // Number of credits to add
+        amountPaid: float // Amount paid in major currency unit (e.g., USD)
+    }
+    """
+    if not req.auth:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
+            message="The function must be called while authenticated."
+        )
+    user_id = req.auth.uid
+
+    payment_id = req.data.get("razorpay_payment_id")
+    order_id = req.data.get("razorpay_order_id")
+    signature = req.data.get("razorpay_signature")
+    package_id = req.data.get("packageId")
+    credits_to_add = req.data.get("creditsToAdd")
+    amount_paid = req.data.get("amountPaid") # e.g. 10 for $10
+
+    if not all([payment_id, order_id, signature, package_id, credits_to_add, amount_paid]):
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Missing required payment verification details."
+        )
+    
+    if not isinstance(credits_to_add, int) or credits_to_add <= 0:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Invalid 'creditsToAdd' provided."
+        )
+    
+    if not isinstance(amount_paid, (int, float)) or amount_paid <= 0:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="Invalid 'amountPaid' provided."
+        )
+
+    params_dict = {
+        'razorpay_order_id': order_id,
+        'razorpay_payment_id': payment_id,
+        'razorpay_signature': signature
+    }
+
+    try:
+        logger.info(f"Verifying Razorpay payment for user {user_id}, order {order_id}, payment {payment_id}")
+        razorpay_client.utility.verify_payment_signature(params_dict)
+        logger.info(f"Razorpay payment signature verified successfully for user {user_id}, order {order_id}")
+
+        # Signature is verified, now add credits and record transaction
+        user_ref = DB.collection("users").document(user_id)
+        
+        # Use a transaction to ensure atomicity
+        transaction = DB.transaction()
+
+        @firestore.transactional
+        def _update_credits_and_log_transaction(trans: firestore.Transaction, user_doc_ref: firestore.DocumentReference):
+            user_snapshot = user_doc_ref.get(transaction=trans)
+            if not user_snapshot.exists:
+                logger.error(f"User document not found for user {user_id} during credit update.")
+                # This case should ideally not happen if user is authenticated and exists
+                raise Exception("User record not found for credit update.")
+
+            # Add credits
+            trans.update(user_doc_ref, {"credits": firestore.Increment(credits_to_add)})
+
+            # Log the credit transaction
+            transaction_ref = DB.collection("creditTransactions").document()
+            trans.set(transaction_ref, {
+                "userId": user_id,
+                "credits": credits_to_add,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "type": "purchase",
+                "reason": f"Purchased package: {package_id}",
+                "packageId": package_id,
+                "paymentId": payment_id, # Razorpay payment ID
+                "orderId": order_id,     # Razorpay order ID
+                "amount": amount_paid,   # Amount in major currency unit (e.g., USD)
+                "currency": "USD"        # Assuming USD
+            })
+            logger.info(f"Successfully prepared credit update and transaction log for user {user_id} in transaction.")
+
+        _update_credits_and_log_transaction(transaction, user_ref)
+        
+        logger.info(f"Successfully added {credits_to_add} credits to user {user_id} for package {package_id}.")
+        return {"success": True, "message": "Payment verified and credits added successfully."}
+
+    except razorpay.errors.SignatureVerificationError as sve:
+        logger.error(f"Razorpay signature verification failed for user {user_id}, order {order_id}: {sve}")
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.UNAUTHENTICATED, # Or PERMISSION_DENIED
+            message="Payment verification failed: Invalid signature."
+        )
+    except Exception as e:
+        logger.error(f"Error verifying Razorpay payment or updating credits for user {user_id}: {e}", exc_info=True)
+        # Potentially, if signature was verified but Firestore update failed, this needs careful handling (e.g., manual check)
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INTERNAL,
+            message=f"Failed to verify payment or update credits: {str(e)}"
+        )
+
+
 # --- Pub/Sub Triggered Function: execute_site_indexing ---
 @pubsub_fn.on_message_published(
     topic=PUBSUB_TOPIC_ID,
@@ -795,7 +1004,6 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
         update_indexing_history(indexing_history_id, "failed", f"Unexpected GSC client initialization error: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
         return # Stop processing
 
-    # Define current_timestamp here, after successful GSC client init and before processing
     current_timestamp = datetime.datetime.now(datetime.timezone.utc)
 
     # --- 3. Inspect URLs & Store Results ---
@@ -1007,7 +1215,7 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
 def execute_site_reindexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublishedData]) -> None:
     """
     Background function to process site re-indexing tasks from Pub/Sub.
-    Currently simulates re-indexing by updating Firestore.
+    Uses the Google Indexing API to request re-indexing.
     """
     try:
         message_data_bytes = event.data.message.data
@@ -1062,7 +1270,7 @@ def execute_site_reindexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublish
             _deduct_credits_in_transaction(transaction, user_ref, credits_to_deduct, user_id)
             credits_deducted_successfully = True
             logger.info(f"Successfully deducted {credits_to_deduct} credits for user {user_id} for re-indexing site {site_url}.")
-            update_reindex_history(indexing_history_id, "processing", f"Successfully deducted {credits_to_deduct} credits. Starting re-index requests.", {"creditsUsed": credits_to_deduct})
+            update_reindex_history(indexing_history_id, "processing", f"Successfully deducted {credits_to_deduct} credits. Preparing for Indexing API calls.", {"creditsUsed": credits_to_deduct})
         except https_fn.HttpsError as e:
             logger.error(f"Credit deduction HttpsError for re-indexing (user {user_id}, site {site_url}): {e.message}.")
             update_reindex_history(indexing_history_id, "failed", f"Credit deduction failed: {e.message}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsUsed": 0})
@@ -1074,134 +1282,217 @@ def execute_site_reindexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublish
     else:
         logger.info(f"No credits to deduct for re-indexing (user {user_id}, site {site_url}).")
         credits_deducted_successfully = True # Effectively true
-        update_reindex_history(indexing_history_id, "processing", "No credits to deduct. Starting re-index requests.", {"creditsUsed": 0})
+        update_reindex_history(indexing_history_id, "processing", "No credits to deduct. Preparing for Indexing API calls.", {"creditsUsed": 0})
 
-    # --- 2. Initialize Google Search Console API (or Indexing API if used in future) ---
-    # For now, we might not need the client if we're just simulating.
-    # search_console = None
-    # try:
-    #     search_console = _get_authenticated_gsc_client(user_auth_details, user_id)
-    # except Exception as e:
-    #     logger.error(f"Failed to initialize GSC client for re-indexing (user {user_id}, site {site_url}): {e}")
-    #     if credits_deducted_successfully and credits_to_deduct > 0:
-    #         user_ref.update({"credits": firestore.Increment(credits_to_deduct)}) # Refund
-    #         logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} (re-indexing GSC init fail).")
-    #     update_reindex_history(indexing_history_id, "failed", f"GSC client initialization failed: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
-    #     return
-    logger.info(f"GSC client initialization skipped for simulated re-indexing (user {user_id}, site {site_url}).")
+    # --- 2. Initialize Google Indexing API Client ---
+    indexing_service = None
+    try:
+        # Extract token details from user_auth_details
+        access_token = user_auth_details.get("searchConsoleAccessToken")
+        refresh_token = user_auth_details.get("searchConsoleRefreshToken")
+        # Expiry time is not directly used here for building, but was checked by _get_authenticated_gsc_client
+        # For Indexing API, we need to ensure the token is valid or refreshable.
+        
+        if not access_token:
+            raise ValueError("Access token is missing from user_auth_details.")
 
+        # These should ideally come from a secure configuration or environment variables.
+        # Using the same ones as in _get_authenticated_gsc_client for consistency
+        client_id = "146812028648-rr5q1301sdp1r8g6pjlcd26r8cnv6gf2.apps.googleusercontent.com"
+        client_secret = "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"
+        token_uri = 'https://oauth2.googleapis.com/token'
 
-    current_timestamp = datetime.datetime.now(datetime.timezone.utc)
-    urls_reindex_requested_count = 0
-    
-    # --- 3. Simulate Re-indexing URLs & Update Page Statuses ---
-    if not urls_to_reindex:
-        logger.info(f"No URLs provided in payload for re-indexing (user {user_id}, site {site_url}).")
-        update_reindex_history(indexing_history_id, "successful", "No URLs were provided in the payload to re-index.", {"completedAt": firestore.SERVER_TIMESTAMP, "urlsProcessedCount": 0})
+        credentials = Credentials(
+            token=access_token,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=['https://www.googleapis.com/auth/indexing'] # Crucial scope for Indexing API
+        )
+
+        # Attempt to refresh the token if it might be stale or to ensure validity
+        # The Google API client library often handles this automatically if refresh_token is present
+        # but an explicit check/refresh can be done if needed, similar to _get_authenticated_gsc_client.
+        # For simplicity here, we rely on the client library's auto-refresh if configured.
+        # If token is expired and no refresh token, this will fail.
+        if credentials.expired and credentials.refresh_token:
+            try:
+                credentials.refresh(GoogleAuthRequest())
+                logger.info(f"Successfully refreshed Indexing API token for user {user_id}.")
+                # NOTE: The refreshed token (credentials.token, credentials.refresh_token if changed)
+                # should ideally be saved back to Firestore for this user.
+                # This is a common pattern missing here which _get_authenticated_gsc_client handles.
+            except GoogleRefreshError as re:
+                logger.error(f"Failed to refresh Indexing API token for user {user_id}: {re}", exc_info=True)
+                error_details = str(re).lower()
+                is_invalid_grant = "invalid_grant" in error_details
+
+                failure_message = f"Google API token refresh failed: {re}"
+                history_status = "failed" # Generic failure status for indexingHistory
+
+                if is_invalid_grant:
+                    failure_message = "Google API authentication failed because the token grant is invalid. This usually means the app's access was revoked or the refresh token expired. Please go to your account settings, disconnect, and then reconnect your Google Account."
+                    history_status = "failed_authentication" # Specific status for UI/user
+                    logger.warn(f"Invalid grant for user {user_id}. Refresh token is invalid or revoked. User needs to re-authenticate.")
+                    # Future enhancement: Consider clearing tokens from user_ref or setting a flag
+                    # e.g., user_ref.update({"searchConsoleAccessToken": None, "searchConsoleRefreshToken": None, "googleAuthInvalid": True, "searchConsoleAccessTokenExpiryTime": 0})
+
+                # Refund credits if they were deducted
+                if credits_deducted_successfully and credits_to_deduct > 0:
+                    try:
+                        user_ref.update({"credits": firestore.Increment(credits_to_deduct)})
+                        logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} due to token refresh failure for site {site_url}.")
+                    except Exception as refund_err:
+                        logger.error(f"Failed to roll back credits for user {user_id} after token refresh failure: {refund_err}", exc_info=True)
+                
+                update_reindex_history(
+                    indexing_history_id,
+                    history_status,
+                    failure_message,
+                    {
+                        "completedAt": firestore.SERVER_TIMESTAMP,
+                        "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0
+                    }
+                )
+                return # Stop processing for this task. Do not re-raise to cause Pub/Sub retries for auth errors.
+
+        indexing_service = build('indexing', 'v3', credentials=credentials, cache_discovery=False)
+        logger.info(f"Successfully initialized Google Indexing API client for user {user_id}.")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize Indexing API client for user {user_id} (site {site_url}): {e}", exc_info=True)
+        if credits_deducted_successfully and credits_to_deduct > 0:
+            user_ref.update({"credits": firestore.Increment(credits_to_deduct)}) # Refund
+            logger.info(f"Rolled back {credits_to_deduct} credits for user {user_id} (Indexing API client init fail).")
+        update_reindex_history(indexing_history_id, "failed", f"Indexing API client initialization failed: {str(e)}", {"completedAt": firestore.SERVER_TIMESTAMP, "creditsRolledBack": credits_deducted_successfully and credits_to_deduct > 0})
         return
 
-    logger.info(f"Simulating re-index requests for {len(urls_to_reindex)} URLs for site: {site_url}, user: {user_id}")
+    current_timestamp = datetime.datetime.now(datetime.timezone.utc)
+    urls_reindex_succeeded_count = 0
+    urls_reindex_failed_details = {} # Store details of failed API calls
+
+    # --- 3. Request Re-indexing via Google Indexing API & Update Page Statuses ---
+    if not urls_to_reindex:
+        logger.info(f"No URLs provided in payload for re-indexing (user {user_id}, site {site_url}).")
+        update_reindex_history(indexing_history_id, "successful", "No URLs were provided in the payload to re-index.", {"completedAt": firestore.SERVER_TIMESTAMP, "urlsProcessedCount": 0, "urlsSucceededCount": 0})
+        return
+
+    logger.info(f"Requesting re-indexing for {len(urls_to_reindex)} URLs for site: {site_url}, user: {user_id} via Indexing API.")
     
-    # Batch update for page statuses
     batch = DB.batch()
     pages_collection_ref = DB.collection("pages")
     updated_page_ids_for_logging = []
+    processed_urls_count = 0
 
     for url_to_reindex_item in urls_to_reindex:
-        # Actual Indexing API call would be:
-        # try:
-        #   indexing_service.urlNotifications().publish(body={'url': url_to_reindex_item, 'type': 'URL_UPDATED'}).execute()
-        #   logger.info(f"Successfully submitted {url_to_reindex_item} to Indexing API for site {site_url}.")
-        #   urls_reindex_requested_count += 1
-        # except Exception as e:
-        #   logger.error(f"Failed to submit {url_to_reindex_item} to Indexing API: {e}")
-        # For simulation:
-        logger.info(f"Simulated: Requested re-indexing for URL {url_to_reindex_item} for site {site_url}")
-        urls_reindex_requested_count += 1
+        processed_urls_count += 1
+        try:
+            # Indexing API endpoint: https://indexing.googleapis.com/v3/urlNotifications:publish
+            # Body: { "url": "URL_TO_SUBMIT", "type": "URL_UPDATED" } or "URL_DELETED"
+            api_request_body = {
+                'url': url_to_reindex_item,
+                'type': 'URL_UPDATED' # For re-indexing existing or new content
+            }
+            indexing_service.urlNotifications().publish(body=api_request_body).execute()
+            
+            logger.info(f"Successfully submitted URL {url_to_reindex_item} to Indexing API for site {site_url} (user {user_id}).")
+            urls_reindex_succeeded_count += 1
 
-        # Find and update page document
-        # This query can be slow if done one-by-one in a loop.
-        # Consider if page IDs can be passed or if a more efficient update is needed.
-        # For now, proceed with individual queries and batched writes.
-        page_query = pages_collection_ref.where("userId", "==", user_id).where("siteId", "==", site_id_for_pages).where("pageUrl", "==", url_to_reindex_item).limit(1)
-        page_docs = list(page_query.stream())
-        if page_docs:
-            page_doc_ref = page_docs[0].reference
-            batch.update(page_doc_ref, {
-                "status": "REINDEX_REQUESTED", # New status
-                "lastReindexRequestedAt": current_timestamp
-            })
-            updated_page_ids_for_logging.append(page_docs[0].id)
-        else:
-            logger.warning(f"Could not find page document for URL {url_to_reindex_item} (siteId {site_id_for_pages}) to update status to REINDEX_REQUESTED.")
-        
-        time.sleep(0.05) # Small delay if there were actual API calls with quotas
+            # Find and update page document to 'REINDEX_REQUESTED'
+            page_query = pages_collection_ref.where("userId", "==", user_id).where("siteId", "==", site_id_for_pages).where("pageUrl", "==", url_to_reindex_item).limit(1)
+            page_docs = list(page_query.stream())
+            if page_docs:
+                page_doc_ref = page_docs[0].reference
+                batch.update(page_doc_ref, {
+                    "status": "REINDEX_REQUESTED", 
+                    "lastReindexRequestedAt": current_timestamp,
+                    "lastReindexApiStatus": "SUCCESS"
+                })
+                updated_page_ids_for_logging.append(page_doc_ref.id)
+            else:
+                logger.warning(f"Page document not found for user {user_id}, site {site_url}, URL {url_to_reindex_item}.")
 
+        except GoogleHttpError as e:
+            logger.error(f"Google API error re-indexing URL {url_to_reindex_item} for site {site_url} (user {user_id}): {e}")
+            urls_reindex_failed_details[url_to_reindex_item] = f"ERROR_GSC_API: {e.resp.status}"
+        except Exception as e:
+            logger.error(f"Unexpected error re-indexing URL {url_to_reindex_item} for site {site_url} (user {user_id}): {e}", exc_info=True)
+            urls_reindex_failed_details[url_to_reindex_item] = "ERROR_REINDEXING_GENERIC"
+
+    # Commit batch updates for page statuses
     if updated_page_ids_for_logging:
         try:
             batch.commit()
-            logger.info(f"Successfully batched updates for {len(updated_page_ids_for_logging)} pages to REINDEX_REQUESTED for site {site_url}, user {user_id}.")
+            logger.info(f"Successfully updated {len(updated_page_ids_for_logging)} page documents to REINDEX_REQUESTED status for site {site_url}, user {user_id}.")
         except Exception as e:
-            logger.error(f"Error committing batch of page updates for re-indexing (user {user_id}, site {site_url}): {e}", exc_info=True)
-            # Credits not rolled back as "work" (simulated) was done.
-            update_reindex_history(
-                indexing_history_id, 
-                "failed", 
-                f"Re-indexing simulated for {urls_reindex_requested_count} URLs, but failed to update all page statuses in Firestore: {str(e)}",
-                {
-                    "completedAt": firestore.SERVER_TIMESTAMP,
-                    "urlsProcessedCount": urls_reindex_requested_count # urls_reindex_requested_count is a better name here
-                }
-            )
-            # Continue to update site document if possible, but history shows partial failure.
-
-
-    logger.info(f"Re-index request simulation complete for {site_url} (user {user_id}). Requested: {urls_reindex_requested_count}/{len(urls_to_reindex)}")
-
-    # --- 4. Update the parent Site Document ---
-    if site_id_for_pages:
-        site_doc_ref = DB.collection("sites").document(site_id_for_pages)
-        try:
-            site_update_data = {
-                "lastReindexRequestAt": current_timestamp, # New field
-                "lastReindexStatus": "completed" if urls_reindex_requested_count == len(urls_to_reindex) else "completed_with_errors",
-                "lastReindexMessage": f"Re-indexing requested for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs."
-            }
-            site_doc_ref.update(site_update_data)
-            logger.info(f"Successfully updated site document '{site_id_for_pages}' for user '{user_id}' after re-indexing request.")
-            
+            logger.error(f"Error committing batch update of page documents for re-indexing (user {user_id}, site {site_url}): {e}", exc_info=True)
+            # Handle batch commit error (e.g., partial failure)
+            # Decide on rollback strategy: manual inspection, automated rollback, or alerting
             update_reindex_history(
                 indexing_history_id,
-                "successful" if urls_reindex_requested_count == len(urls_to_reindex) else "completed_with_errors",
-                f"Re-indexing requested for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs.",
+                "partial_success",
+                f"Re-indexing request succeeded for {urls_reindex_succeeded_count} URLs, but updating page statuses encountered an error: {str(e)}",
                 {
                     "completedAt": firestore.SERVER_TIMESTAMP,
-                    "urlsProcessedCount": urls_reindex_requested_count
+                    "urlsProcessedCount": processed_urls_count,
+                    "urlsSucceededCount": urls_reindex_succeeded_count,
+                    "urlsFailedCount": len(urls_reindex_failed_details),
+                    "failureDetails": urls_reindex_failed_details
                 }
             )
-        except Exception as e:
-            logger.error(f"Error updating site document '{site_id_for_pages}' after re-indexing (user '{user_id}'): {e}", exc_info=True)
-            update_reindex_history(
-                indexing_history_id,
-                "failed", # Or a more specific status
-                f"Re-indexing processed for {urls_reindex_requested_count} URLs, but failed to update site summary: {str(e)}",
-                {
-                    "completedAt": firestore.SERVER_TIMESTAMP,
-                    "urlsProcessedCount": urls_reindex_requested_count
-                }
-            )
+            return # Consider stopping further processing if critical failure
     else:
-        logger.warning(f"site_id_for_pages was missing. Cannot update parent site document after re-indexing for user '{user_id}', siteUrl '{site_url}'.")
-        # Update history if site_id was missing but processing happened
-        if indexing_history_id:
-             update_reindex_history(
+        logger.info(f"No page status updates were needed for re-indexing for site {site_url}, user {user_id}.")
+
+    # --- 4. Update Indexing History ---
+    try:
+        if urls_reindex_failed_details and len(urls_reindex_failed_details) == len(urls_to_reindex):
+            # All URLs failed
+            update_reindex_history(
                 indexing_history_id,
-                "successful" if urls_reindex_requested_count == len(urls_to_reindex) and urls_reindex_requested_count > 0 else "failed",
-                f"Re-indexing processed for {urls_reindex_requested_count}/{len(urls_to_reindex)} URLs. Site summary not updated (siteId missing).",
+                "failed",
+                f"Re-indexing request processed, but all {len(urls_to_reindex)} URLs failed. No URLs were successfully re-indexed.",
                 {
                     "completedAt": firestore.SERVER_TIMESTAMP,
-                    "urlsProcessedCount": urls_reindex_requested_count
+                    "urlsProcessedCount": len(urls_to_reindex),
+                    "urlsSucceededCount": 0,
+                    "urlsFailedCount": len(urls_reindex_failed_details),
+                    "failureDetails": urls_reindex_failed_details
                 }
             )
+        elif urls_reindex_succeeded_count > 0:
+            # Some URLs succeeded
+            update_reindex_history(
+                indexing_history_id,
+                "successful",
+                f"Re-indexing request processed. Successfully re-indexed {urls_reindex_succeeded_count} URLs.",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": processed_urls_count,
+                    "urlsSucceededCount": urls_reindex_succeeded_count,
+                    "urlsFailedCount": len(urls_reindex_failed_details),
+                    "failureDetails": urls_reindex_failed_details
+                }
+            )
+        else:
+            # No URLs processed (unlikely, but just in case)
+            update_reindex_history(
+                indexing_history_id,
+                "info",
+                "Re-indexing request processed, but no URLs were found to re-index.",
+                {
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+                    "urlsProcessedCount": 0,
+                    "urlsSucceededCount": 0,
+                    "urlsFailedCount": 0
+                }
+            )
+    except Exception as e:
+        logger.error(f"Error updating re-indexing history for user {user_id}, site {site_url}: {e}", exc_info=True)
+        # Final fallback: if history update fails, there's not much we can do in this context.
+        # Consider alerting, retrying, or manual intervention based on criticality and monitoring setup.
 
-    logger.info(f"execute_site_reindexing finished for user {user_id}, site {site_url}. Processed {urls_reindex_requested_count} of {len(urls_to_reindex)} URLs.")
+
+    logger.info(f"execute_site_reindexing finished for user {user_id}, site {site_url}. Processed {processed_urls_count} URLs. Succeeded: {urls_reindex_succeeded_count}, Failed: {len(urls_reindex_failed_details)}.")
+    # Consider adding a summary log of succeeded/failed URLs if needed for quick monitoring.

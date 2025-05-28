@@ -1,6 +1,6 @@
-firebase-admin
 firebase-functions
+firebase-admin
 google-api-python-client
-google-cloud-pubsub
 google-auth
-google-auth-oauthlib
+google-cloud-pubsub
+razorpay

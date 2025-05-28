@@ -97,7 +97,7 @@ const RecentActivityList: React.FC<RecentActivityListProps> = ({ activities, sit
           </div>
           <div className="text-right">
             <div className="text-xs font-medium text-slate-700 bg-slate-100 py-1 px-2 rounded-full">
-              {activity.status == 'successful' ? activity.creditsUsed + " credits used" : activity.estimatedCredits + " credits estimated"}
+                {activity.status === 'failed' ? "0 credits used" : activity.status === 'successful' ? `${activity.creditsUsed} credits used` : `${activity.estimatedCredits} credits estimated`}
             </div>
           </div>
         </div>

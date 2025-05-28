@@ -1,19 +1,24 @@
+declare global {
+  interface Window {
+    Razorpay: any;
+  }
+}
+
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   CreditCard, 
-  Package, 
   RefreshCw, 
   Download, 
   CheckCircle, 
   ChevronRight,
   Info,
   PlusCircle,
-  Receipt,
   AlertTriangle
 } from 'lucide-react';
 import { collection, query, where, getDocs, orderBy, limit, Timestamp } from 'firebase/firestore';
-import { db } from '../../config/firebase';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions } from '../../config/firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useCredits } from '../../contexts/CreditContext';
 import { CreditPackage, CreditTransaction } from '../../types/credits';
@@ -23,7 +28,7 @@ import PaymentMethodCard from './components/PaymentMethodCard';
 
 const BillingPage: React.FC = () => {
   const { currentUser } = useAuth();
-  const { credits, getCreditPackages, purchaseCredits } = useCredits();
+  const { credits, getCreditPackages } = useCredits();
   const [creditPackages, setCreditPackages] = useState<CreditPackage[]>([]);
   const [transactions, setTransactions] = useState<CreditTransaction[]>([]);
   const [selectedPackage, setSelectedPackage] = useState<string>('');
@@ -31,6 +36,7 @@ const BillingPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [purchaseLoading, setPurchaseLoading] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [purchaseError, setPurchaseError] = useState(''); // Add state for purchase errors
 
   useEffect(() => {
     if (!currentUser) return;
@@ -68,41 +74,127 @@ const BillingPage: React.FC = () => {
   }, [currentUser, getCreditPackages]);
 
   const handlePurchase = async () => {
-    if (!selectedPackage) return;
+    if (!selectedPackage || !currentUser) {
+      setPurchaseError("Please select a package.");
+      return;
+    }
     
+    const pkgDetails = creditPackages.find(p => p.id === selectedPackage);
+    if (!pkgDetails) {
+      setPurchaseError("Selected package details not found.");
+      return;
+    }
+
     setPurchaseLoading(true);
+    setPurchaseError('');
+    setSuccessMessage('');
+
     try {
-      const result = await purchaseCredits(selectedPackage, quantity);
+      // 1. Create Razorpay Order via Firebase Function
+      const createOrderFunction = httpsCallable(functions, 'create_razorpay_order');
+      const orderPayload = {
+        amount: pkgDetails.price * quantity, // Price in USD
+        currency: 'USD',
+        packageId: pkgDetails.id,
+        packageName: pkgDetails.name,
+      };
       
-      if (result) {
-        setSuccessMessage('Credits purchased successfully!');
-        setTimeout(() => setSuccessMessage(''), 5000);
-        
-        // Reset selection
-        setSelectedPackage('');
-        setQuantity(1);
-        
-        // Update transactions
-        const now = Timestamp.now();
-        const selectedPkg = creditPackages.find(p => p.id === selectedPackage);
-        
-        if (selectedPkg) {
-          const newTransaction: CreditTransaction = {
-            id: `temp-${Date.now()}`,
-            userId: currentUser!.uid,
-            packageId: selectedPackage,
-            credits: selectedPkg.credits * quantity,
-            amount: selectedPkg.price * quantity,
-            timestamp: now,
-            type: 'purchase'
-          };
-          
-          setTransactions(prev => [newTransaction, ...prev]);
-        }
+      const orderResult = await createOrderFunction(orderPayload);
+      const orderData = orderResult.data as any; // Cast to expected type
+
+      if (!orderData.success || !orderData.orderId) {
+        throw new Error(orderData.message || 'Failed to create Razorpay order.');
       }
-    } catch (err) {
+
+      // 2. Initialize Razorpay Checkout
+      const options = {
+        key: orderData.razorpayKeyId, // Your Razorpay Key ID
+        amount: orderData.amount, // Amount in the smallest currency unit (e.g., paise/cents)
+        currency: orderData.currency,
+        name: 'Index Checker', // Your App Name
+        description: `Purchase ${pkgDetails.name}`,
+        order_id: orderData.orderId, // From Firebase function
+        handler: async (response: any) => {
+          // 3. Verify Payment via Firebase Function
+          try {
+            const verifyPaymentFunction = httpsCallable(functions, 'verify_razorpay_payment');
+            const verificationPayload = {
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+              packageId: pkgDetails.id,
+              creditsToAdd: pkgDetails.credits * quantity,
+              amountPaid: pkgDetails.price * quantity, // Amount in USD
+            };
+            
+            const verificationResult = await verifyPaymentFunction(verificationPayload);
+            const verificationData = verificationResult.data as any;
+
+            if (verificationData.success) {
+              setSuccessMessage('Credits purchased successfully! Your balance will update shortly.');
+              // Optionally, re-fetch transactions or user credits here to get the latest data
+              // For optimistic UI update (current approach):
+              const newTransaction: CreditTransaction = {
+                id: response.razorpay_payment_id, // Use actual payment ID
+                userId: currentUser!.uid,
+                packageId: selectedPackage,
+                credits: pkgDetails.credits * quantity,
+                amount: pkgDetails.price * quantity,
+                currency: 'USD',
+                paymentId: response.razorpay_payment_id,
+                orderId: response.razorpay_order_id,
+                timestamp: Timestamp.now(), // Or server timestamp from verification if available
+                type: 'purchase',
+                reason: `Purchased ${pkgDetails.name}`
+              };
+              setTransactions(prev => [newTransaction, ...prev.filter(t => !t.id.startsWith('temp-'))]);
+              // Consider calling a function from useCredits to refresh credits balance
+              // e.g., refreshCredits(); 
+
+              setSelectedPackage('');
+              setQuantity(1);
+            } else {
+              setPurchaseError(verificationData.message || 'Payment verification failed.');
+            }
+          } catch (verifyError: any) {
+            console.error('Error verifying payment:', verifyError);
+            setPurchaseError(verifyError.message || 'An error occurred during payment verification.');
+          } finally {
+            setPurchaseLoading(false);
+          }
+        },
+        prefill: {
+          name: currentUser.displayName || '',
+          email: currentUser.email || '',
+          // contact: currentUser.phoneNumber || '' // If available
+        },
+        notes: {
+          userId: currentUser.uid,
+          packageId: pkgDetails.id,
+        },
+        theme: {
+          color: '#3B82F6' // Example: Blue-500 from Tailwind
+        },
+        modal: {
+          ondismiss: () => {
+            setPurchaseLoading(false);
+            setPurchaseError('Payment was cancelled.');
+          }
+        }
+      };
+      
+      const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', function (response: any){
+        console.error('Razorpay payment failed:', response.error);
+        setPurchaseError(`Payment Failed: ${response.error.description} (Reason: ${response.error.reason})`);
+        setPurchaseLoading(false);
+      });
+      rzp.open();
+      // setPurchaseLoading(false) is handled by Razorpay's handler or ondismiss
+
+    } catch (err: any) {
       console.error('Error purchasing credits:', err);
-    } finally {
+      setPurchaseError(err.message || 'An error occurred during the purchase process.');
       setPurchaseLoading(false);
     }
   };
@@ -128,7 +220,14 @@ const BillingPage: React.FC = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      {purchaseError && (
+        <div className="bg-red-50 border border-red-100 text-red-800 rounded-lg p-4 mb-6 flex items-center">
+          <AlertTriangle className="w-5 h-5 mr-2 text-red-600" />
+          {purchaseError}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Main Content */}
         <div className="lg:col-span-2 space-y-8">
           {/* Purchase Credits */}
@@ -216,7 +315,7 @@ const BillingPage: React.FC = () => {
                     <h3 className="font-medium text-blue-800 mb-1">Volume Discounts Available</h3>
                     <p className="text-sm text-blue-700">
                       For custom packages or volume discounts on larger credit purchases, please 
-                      <a href="mailto:support@Index Checker.com" className="font-medium underline ml-1">contact our team</a>.
+                      <a href="mailto:support@indexchecker.ai" className="font-medium underline ml-1">contact our team</a>.
                     </p>
                   </div>
                 </div>
@@ -249,7 +348,7 @@ const BillingPage: React.FC = () => {
               <h2 className="text-lg font-semibold text-slate-900">Credit Usage</h2>
             </div>
             <div className="p-6">
-              <div className="mb-6">
+              {/* <div className="mb-6">
                 <div className="flex justify-between mb-2">
                   <span className="text-slate-600">Available Credits</span>
                   <span className="font-semibold text-slate-900">{credits}</span>
@@ -257,7 +356,7 @@ const BillingPage: React.FC = () => {
                 <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                   <div className="h-full bg-blue-800 rounded-full" style={{ width: '45%' }}></div>
                 </div>
-              </div>
+              </div> */}
               
               <div className="space-y-4">
                 <div className="flex items-start">
@@ -265,7 +364,7 @@ const BillingPage: React.FC = () => {
                     <CheckCircle className="w-4 h-4 text-blue-800" />
                   </div>
                   <div>
-                    <h3 className="font-medium text-slate-800">Checking Pages</h3>
+                    <h4 className="font-medium text-slate-800">Checking Pages</h4>
                     <p className="text-sm text-slate-600">1 credit per page checked</p>
                   </div>
                 </div>
@@ -275,7 +374,7 @@ const BillingPage: React.FC = () => {
                     <RefreshCw className="w-4 h-4 text-green-700" />
                   </div>
                   <div>
-                    <h3 className="font-medium text-slate-800">Requesting Indexing</h3>
+                    <h4 className="font-medium text-slate-800">Requesting Indexing</h4>
                     <p className="text-sm text-slate-600">5 credits per indexing request</p>
                   </div>
                 </div>
@@ -291,7 +390,7 @@ const BillingPage: React.FC = () => {
           </div>
           
           {/* Payment Methods */}
-          <div className="card">
+          {/* <div className="card">
             <div className="p-6 border-b border-slate-100">
               <h2 className="text-lg font-semibold text-slate-900">Payment Methods</h2>
             </div>
@@ -308,7 +407,7 @@ const BillingPage: React.FC = () => {
                 Add Payment Method
               </button>
             </div>
-          </div>
+          </div> */}
           
           {/* Billing FAQ */}
           <div className="card">
@@ -318,17 +417,17 @@ const BillingPage: React.FC = () => {
             <div className="p-6">
               <div className="space-y-4">
                 <div>
-                  <h3 className="font-medium text-slate-800 mb-1">Do credits expire?</h3>
+                  <h4 className="font-medium text-slate-800 mb-1">Do credits expire?</h4>
                   <p className="text-sm text-slate-600">No, your purchased credits never expire.</p>
                 </div>
                 
                 <div>
-                  <h3 className="font-medium text-slate-800 mb-1">Can I get a refund?</h3>
+                  <h4 className="font-medium text-slate-800 mb-1">Can I get a refund?</h4>
                   <p className="text-sm text-slate-600">Unused credits can be refunded within 30 days of purchase.</p>
                 </div>
                 
                 <div>
-                  <h3 className="font-medium text-slate-800 mb-1">Are there any hidden fees?</h3>
+                  <h4 className="font-medium text-slate-800 mb-1">Are there any hidden fees?</h4>
                   <p className="text-sm text-slate-600">No, you only pay for the credits you purchase.</p>
                 </div>
               </div>

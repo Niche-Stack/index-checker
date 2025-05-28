@@ -71,6 +71,8 @@ const OnboardingPage: React.FC = () => {
 
       // Add selected GSC sites to Firestore 'sites' collection
       const batch = writeBatch(db);
+      let sitesProcessedForBatch = 0; // Initialize counter
+
       selectedSites.forEach(gscSite => {
         const originalGscSiteUrl = gscSite.siteUrl; // Use a clear name for the original value
 
@@ -109,6 +111,13 @@ const OnboardingPage: React.FC = () => {
           }
         }
         
+        // Ensure siteNameForDb is not empty after all processing (trimming and final check)
+        siteNameForDb = siteNameForDb.trim();
+        if (!siteNameForDb) {
+            console.error(`Could not determine a valid site name for GSC URL: ${originalGscSiteUrl} after attempting all parsing and fallbacks. Skipping this site.`);
+            return; // Skip this site
+        }
+        
         const siteData = {
           userId: currentUser.uid,
           name: siteNameForDb, 
@@ -122,9 +131,21 @@ const OnboardingPage: React.FC = () => {
         };
         const siteRef = doc(collection(db, 'sites')); 
         batch.set(siteRef, siteData);
+        sitesProcessedForBatch++; // Increment counter
       });
-      await batch.commit();
-      console.log('Selected GSC sites added to Firestore.');
+
+      // Check if sites were selected but none were processed
+      if (selectedSites.length > 0 && sitesProcessedForBatch === 0) {
+        console.error('Onboarding Error: None of the selected GSC sites could be processed. Please check their format in Google Search Console.');
+        throw new Error('Failed to process any selected sites. Please ensure they are valid and try again.');
+      }
+
+      if (sitesProcessedForBatch > 0) {
+        await batch.commit();
+        console.log(`${sitesProcessedForBatch} GSC sites added to Firestore.`);
+      } else {
+        console.log('No GSC sites were processed to be added to Firestore.');
+      }
       
       navigate('/dashboard');
     } catch (err) {

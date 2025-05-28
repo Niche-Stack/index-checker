@@ -129,14 +129,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const sitemapsData = await sitemapsResponse.json();
             if (sitemapsData.sitemap) {
               sitemapEntries = sitemapsData.sitemap.map((sm: any) => ({ 
-                path: sm.path, 
+                path: sm.path || null, 
                 lastSubmitted: sm.lastSubmitted ? Timestamp.fromDate(new Date(sm.lastSubmitted)) : null,
-                isPending: sm.isPending, 
-                isSitemapIndex: sm.isSitemapIndex, 
-                type: sm.type, 
+                isPending: typeof sm.isPending === 'boolean' ? sm.isPending : null, 
+                isSitemapIndex: typeof sm.isSitemapIndex === 'boolean' ? sm.isSitemapIndex : null, 
+                type: sm.type || null, 
                 lastDownloaded: sm.lastDownloaded ? Timestamp.fromDate(new Date(sm.lastDownloaded)) : null,
-                warnings: sm.warnings, 
-                errors: sm.errors 
+                warnings: typeof sm.warnings === 'number' ? sm.warnings : 0, 
+                errors: typeof sm.errors === 'number' ? sm.errors : 0 
               }));
             }
           } else {
