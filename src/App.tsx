@@ -15,6 +15,7 @@ const SitesPage = lazy(() => import('./pages/sites/SitesPage'));
 const HistoryPage = lazy(() => import('./pages/history/HistoryPage'));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage'));
 const BillingPage = lazy(() => import('./pages/billing/BillingPage'));
+const PrivacyPolicy = lazy(() => import('./pages/privacy-policy/PrivacyPolicy'));
 
 // Route guards
 const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
@@ -116,6 +117,7 @@ function App() {
             </MainLayout>
           </PrivateRoute>
         } />
+        <Route path="/privacy-policy" element={<PrivacyPolicy />} />
         
         {/* Fallback / 404 Not Found Route */}
         <Route path="*" element={<NotFoundPage />} />

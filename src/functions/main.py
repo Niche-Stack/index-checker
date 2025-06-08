@@ -1020,7 +1020,7 @@ def execute_site_indexing(event: pubsub_fn.CloudEvent[pubsub_fn.MessagePublished
     logger.info(f"Inspecting {len(urls_to_inspect)} URLs for site: {site_url}, user: {user_id}")
     for url_to_inspect in urls_to_inspect:
         try:
-            time.sleep(0.25) # Slightly increased delay, QPS is per project/user for GSC API.
+            # time.sleep(0.25) # Slightly increased delay, QPS is per project/user for GSC API.
             inspection_result = search_console.urlInspection().index().inspect(
                 body={"inspectionUrl": url_to_inspect, "siteUrl": site_url}
             ).execute()

@@ -8,7 +8,7 @@ const Footer: React.FC = () => {
   return (
     <footer className="bg-gray-900 text-white pt-16 pb-8">
       <div className="container mx-auto px-4 md:px-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mb-12">
+        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-3 gap-8 mb-12">
           <div>
             <Logo variant="light" />
             <p className="mt-4 text-gray-400 leading-relaxed">
@@ -30,7 +30,7 @@ const Footer: React.FC = () => {
             </div>
           </div>
 
-          <div>
+          {/* <div>
             <h3 className="text-lg font-semibold mb-4">Quick Links</h3>
             <ul className="space-y-3">
               <li>
@@ -49,22 +49,13 @@ const Footer: React.FC = () => {
                 <a href="#" className="text-gray-400 hover:text-white transition-colors">Blog</a>
               </li>
             </ul>
-          </div>
+          </div> */}
 
           <div>
             <h3 className="text-lg font-semibold mb-4">Legal</h3>
             <ul className="space-y-3">
               <li>
-                <a href="#" className="text-gray-400 hover:text-white transition-colors">Privacy Policy</a>
-              </li>
-              <li>
-                <a href="#" className="text-gray-400 hover:text-white transition-colors">Terms of Service</a>
-              </li>
-              <li>
-                <a href="#" className="text-gray-400 hover:text-white transition-colors">Cookie Policy</a>
-              </li>
-              <li>
-                <a href="#" className="text-gray-400 hover:text-white transition-colors">GDPR Compliance</a>
+                <a href="/privacy-policy" className="text-gray-400 hover:text-white transition-colors">Privacy Policy</a>
               </li>
             </ul>
           </div>
@@ -78,18 +69,6 @@ const Footer: React.FC = () => {
                   info@indexcheckerai.com
                 </a>
               </li>
-              <li className="flex items-start">
-                <Phone size={20} className="mr-3 text-gray-400 flex-shrink-0 mt-1" />
-                <a href="tel:+1234567890" className="text-gray-400 hover:text-white transition-colors">
-                  +1 (234) 567-890
-                </a>
-              </li>
-              <li className="flex items-start">
-                <MapPin size={20} className="mr-3 text-gray-400 flex-shrink-0 mt-1" />
-                <span className="text-gray-400">
-                  123 Tech Avenue, San Francisco, CA 94107
-                </span>
-              </li>
             </ul>
           </div>
         </div>
@@ -100,7 +79,7 @@ const Footer: React.FC = () => {
           <p className="text-gray-500 text-sm mb-4 md:mb-0">
             &copy; {currentYear} Index Checker AI. All rights reserved.
           </p>
-          <div className="flex space-x-4">
+          {/* <div className="flex space-x-4">
             <a href="#" className="text-gray-500 hover:text-white text-sm transition-colors">
               Sitemap
             </a>
@@ -110,7 +89,7 @@ const Footer: React.FC = () => {
             <a href="#" className="text-gray-500 hover:text-white text-sm transition-colors">
               Support
             </a>
-          </div>
+          </div> */}
         </div>
       </div>
     </footer>

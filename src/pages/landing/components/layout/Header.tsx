@@ -26,10 +26,12 @@ const Header: React.FC = () => {
     >
       <div className="container mx-auto px-4 md:px-6">
         <div className="flex items-center justify-between">
-          <Logo />
+          <a href='/' className="flex items-center space-x-2">
+            <Logo />
+          </a>
           
           {/* Desktop Navigation */}
-          <nav className="hidden md:flex items-center space-x-8">
+          {/* <nav className="hidden md:flex items-center space-x-8">
             <a href="#features" className="text-gray-700 hover:text-primary-600 font-medium transition-colors">
               Features
             </a>
@@ -42,7 +44,7 @@ const Header: React.FC = () => {
             <a href="#faq" className="text-gray-700 hover:text-primary-600 font-medium transition-colors">
               FAQ
             </a>
-          </nav>
+          </nav> */}
 
           <div className="hidden md:flex items-center space-x-4">
             <a 

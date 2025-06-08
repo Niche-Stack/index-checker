@@ -47,9 +47,9 @@ const CTA: React.FC = () => {
                 <Button variant="primary" size="lg">
                   Start Your Free Trial
                 </Button>
-                <Button variant="outline" size="lg">
+                {/* <Button variant="outline" size="lg">
                   Schedule a Demo
-                </Button>
+                </Button> */}
               </div>
               
               <p className="mt-6 text-sm text-gray-500">
