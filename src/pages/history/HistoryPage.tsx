@@ -63,7 +63,8 @@ const HistoryPage: React.FC = () => {
               action: data.action,
               result: data.message || 'N/A', // Map message to result
               status: data.status,
-              creditsUsed: data.creditsUsed ?? data.estimatedCredits ?? 0, // Map credits
+              creditsUsed: data.creditsUsed ?? data.estimatedCredits ?? 0,
+              processedItemCount: data.action == 'check' ? data.urlsInspectedCount : data.urlsProcessedCount
             };
           }).filter(item => item.timestamp) as IndexingHistory[]; // Ensure timestamp is valid for sorting/display
           

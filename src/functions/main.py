@@ -301,7 +301,8 @@ def _deduct_credits_in_transaction(transaction: firestore.Transaction, user_doc_
             "http://localhost:5173",
             "https://indexchecker-534db.web.app",
             "https://indexchecker-534db.firebaseapp.com",
-            "https://fea86b333f27.ngrok.app"
+            "https://fea86b333f27.ngrok.app",
+            "https://indexchecker.ai"
         ],
         cors_methods=["POST", "OPTIONS"]
     )
@@ -526,7 +527,8 @@ def get_site_indexing_status(req: https_fn.CallableRequest) -> dict:
             "http://localhost:5173",
             "https://indexchecker-534db.web.app",
             "https://indexchecker-534db.firebaseapp.com",
-            "https://fea86b333f27.ngrok.app"
+            "https://fea86b333f27.ngrok.app",
+            "https://indexchecker.ai"
         ],
         cors_methods=["POST", "OPTIONS"]
     )
@@ -708,7 +710,8 @@ def request_site_reindexing(req: https_fn.CallableRequest) -> dict:
             "http://localhost:5173",
             "https://indexchecker-534db.web.app",
             "https://indexchecker-534db.firebaseapp.com",
-            "https://fea86b333f27.ngrok.app" # Add your ngrok or other dev URLs
+            "https://fea86b333f27.ngrok.app", # Add your ngrok or other dev URLs
+            "https://indexchecker.ai"
         ],
         cors_methods=["POST", "OPTIONS"]
     )
@@ -786,7 +789,8 @@ def create_razorpay_order(req: https_fn.CallableRequest) -> dict:
             "http://localhost:5173",
             "https://indexchecker-534db.web.app",
             "https://indexchecker-534db.firebaseapp.com",
-            "https://fea86b333f27.ngrok.app" # Add your ngrok or other dev URLs
+            "https://fea86b333f27.ngrok.app", # Add your ngrok or other dev URLs
+            "https://indexchecker.ai"
         ],
         cors_methods=["POST", "OPTIONS"]
     )

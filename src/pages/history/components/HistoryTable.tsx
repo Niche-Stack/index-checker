@@ -121,6 +121,8 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
     );
   }
 
+  console.log(history)
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full">
@@ -158,13 +160,13 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ history, sites, loading }) 
               <td className="px-6 py-4 text-sm text-slate-700 text-right whitespace-nowrap">
                 {item.action === 'check' && (
                   <>
-                    <div>{item.indexedItemCount !== undefined ? `${item.indexedItemCount} / ` : ''}{item.processedItemCount !== undefined ? item.processedItemCount : (item.initialItemCount || 0)} URLs</div>
+                    <div>{item.processedItemCount !== undefined ? item.processedItemCount : 0} URLs checked</div>
                     <div className='text-xs'>{item.creditsUsed !== undefined ? `${item.creditsUsed} cred.` : (item.estimatedCredits ? `${item.estimatedCredits} est.` : '')}</div>
                   </>
                 )}
                 {item.action === 'reindex' && (
                   <>
-                    <div>{item.processedItemCount !== undefined ? `${item.processedItemCount} / ` : ''}{item.initialItemCount || 0} URLs</div>
+                    <div>{item.processedItemCount !== undefined ? item.processedItemCount : 0} URLs re-indexed</div>
                     <div className='text-xs'>{item.creditsUsed !== undefined ? `${item.creditsUsed} cred.` : (item.estimatedCredits ? `${item.estimatedCredits} est.` : '')}</div>
                   </>
                 )}
